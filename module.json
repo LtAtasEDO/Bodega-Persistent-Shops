@@ -1,0 +1,43 @@
+{
+  "id": "bodega",
+  "title": "Bodega™ Persistent Shops",
+  "description": "Persistent Cyberpunk RED bodegas with protected vendor purses/actor ledgers, serialized GM-authoritative purchases and live stock updates, package-aware proportional buybacks for ammo/stacked goods with unverified-stack GM-review protection, Fixer/Operator pricing and optional automatic high-price Fixer gating, static + dynamic inventory, multiple RollTable/pack sources, Simple Calendar customer traffic and daily restocking, scrollable curated-source search, direct Monk's Active Tile binding, and a tile-friendly API.",
+  "version": "2.3.4",
+  "authors": [
+    {
+      "name": "Lt Atlas"
+    }
+  ],
+  "compatibility": {
+    "minimum": "12",
+    "verified": "12.343",
+    "maximum": "12"
+  },
+  "relationships": {
+    "systems": [
+      {
+        "id": "cyberpunk-red-core",
+        "type": "system",
+        "compatibility": {
+          "minimum": "0.92.1",
+          "verified": "0.92.4"
+        }
+      }
+    ],
+    "recommends": [
+      {
+        "id": "foundryvtt-simple-calendar",
+        "type": "module"
+      },
+      {
+        "id": "monks-active-tiles",
+        "type": "module"
+      }
+    ]
+  },
+  "scripts": [
+    "scripts/bodega.js"
+  ],
+  "socket": true,
+  "readme": "README.md"
+}
