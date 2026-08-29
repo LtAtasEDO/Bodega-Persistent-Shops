@@ -1,8 +1,7 @@
 # Bodega-Persistent-Shops
 Persistent Cyberpunk RED bodegas with protected vendor ledgers and serialized purchases and live stock updates with GM-review protection of unverified stock. Fixer pricing and automatic Fixer gating with static+dynamic inventory with RollTable/pack sources, Simple Calendar traffic/restocking, with direct Monk's Active Tile binding.
-This module converts the Bodega™ Persistent Shops v2.0.3/v2.0.3c macros and continues as the v2.3.x module line into a world-loaded Foundry module.
 
-Module assisted by AI to help convert macro into module. Legacy macro can be found in Cyberpunk Red Foundry VTT shared content discord channel.
+This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.3.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
 
 ## Install
 
@@ -23,7 +22,7 @@ game.bodega.openAdmin();
 
 ## Open a shop
 
-For a macro, Monk's Active Tile/Trigger script, or another module:
+For a macro, Monk's Active Tile/Trigger script:
 
 ```js
 return game.bodega.openShop("your-shop-id");
@@ -40,6 +39,9 @@ return game.bodega.launch({ id: "your-shop-id" });
 - `game.bodega.openAdmin()` — GM shop manager.
 - `game.bodega.openOptions()` — global Bodega options.
 - `game.bodega.openShop(id)` — player-facing shop.
+- `game.bodega.openVendorToken(token)` — resolve and open a Bodega from a bound vendor Token.
+- `game.bodega.resolveVendorToken(token)` — inspect which Bodega a vendor Token resolves to (specific Token first, then Actor-wide).
+- `game.bodega.playerVendorInteractionMode()` — inspect the configured player vendor modifier-click mode.
 - `game.bodega.launch(input)` — compatibility launcher.
 - `game.bodega.loadAll()` / `saveAll(db)` — database access.
 - `game.bodega.bind()` — manually ensure the socket bridge is bound.
@@ -48,9 +50,57 @@ return game.bodega.launch({ id: "your-shop-id" });
 
 - The GM socket bridge loads automatically; the Autobind macro is no longer required.
 - v2.0.3's full manager, ledger integration, Quick Add, and RollTable tools are retained.
+- Edit Bodega labels the Wealth-linked purse target as **Ledger (Container/Player)**; CPR player Actors and Container Actors are the intended ledger sources.
 - v2.0.3c's repaired player UI and GM buyback ACK/fallback flow are merged in.
 - The socket channel is consolidated under the real module namespace, `module.bodega`.
 - Each dialog receives its own DOM/CSS scope so multiple shop windows can coexist more safely.
+
+## Vendor Token / Actor HUD binding (v2.3.6–v2.3.13)
+
+Bodegas can now be opened directly from an NPC vendor's normal Foundry Token HUD. Open **Edit Bodega → Vendor Token / Actor HUD Binding** and use either binding mode:
+
+- **Actor-wide Vendor** — drop an Actor or Token. Every Token using that Actor resolves to this Bodega. This is useful for a persistent Fixer or shopkeeper who appears on multiple Scenes.
+- **Specific Token Override** — drop a Token. Only that exact Token on that Scene resolves to this Bodega. Exact Token bindings take priority over Actor-wide bindings, which is useful for Night Markets and one-off booths.
+
+As of v2.3.13, the Specific Token area also includes **Bind Selected Token**. Foundry v12 can report a Canvas Token drag to an HTML dialog using an Actor-shaped payload, so Bodega now accepts the common Token payload variants and can resolve a matching single controlled Token. If drag/drop is still awkward, select exactly one placed NPC Token on the current Scene and click **Bind Selected Token**; this stores that exact Scene Token, not merely its Actor.
+
+When a bound vendor's Token HUD is rendered, Bodega adds an **Open Bodega** storefront control for the GM. Opening through the vendor HUD uses the same Bodega shop path as Tiles/macros: serialized purchases, live stock, Preferred Customer pricing, Fixer restrictions, buybacks, dynamic stock, vendor purse/ledger, and package-aware transactions are unchanged.
+
+### Player vendor interaction (v2.3.7–v2.3.8)
+
+Players do **not** need ownership of the vendor NPC. Open **Configure Game Settings → Bodega → Player Vendor Token Interaction** to choose the world-wide gesture used to open a bound vendor:
+
+- **Ctrl/Cmd + Left Click (Recommended)** — default as of v2.3.8.
+- **Shift + Left Click** — optional, but may conflict with Foundry multi-Token selection.
+- **Alt + Left Click** — optional, but may conflict with Token highlighting.
+- **Disabled — GM Token HUD only**.
+
+v2.3.12 hardens that player path further: Bodega now listens primarily on the actual Foundry HTML canvas/board in capture phase and uses visible Token renderer bounds for hit-testing, while retaining the PIXI-stage listener as a fallback. This protects unowned-vendor interaction from Token layers or other modules that stop PIXI propagation. Duplicate-event suppression prevents one Ctrl/Cmd-click from opening the shop twice. **Ctrl/Cmd + Left Click** remains the recommended default because live Foundry validation showed Shift and Alt already serve Token-selection/highlight behaviors. Only the configured gesture over an actual Bodega-bound vendor is consumed; ordinary clicks, modifier-clicks on unrelated Tokens, and modifier-clicks on empty canvas space remain Foundry-owned.
+
+The GM Token HUD storefront control is always retained regardless of this setting. The setting changes only the extra player interaction path.
+
+The vendor Token is excluded when Bodega chooses the customer Actor. Bodega prefers another controlled customer Token and otherwise falls back to `game.user.character`, so the shopkeeper is not accidentally treated as the buyer. Scene-only restrictions still apply to players.
+
+API helpers:
+
+```js
+await game.bodega.resolveVendorToken(token);
+await game.bodega.openVendorToken(token);
+```
+
+Tile binding remains fully supported; a world can freely mix Tiles, vendor Tokens, and direct macro/API storefronts.
+
+## Preferred Customer discounts (v2.3.5)
+
+A GM can reward specific characters with a shop-specific purchase discount without changing their Role. Open **Edit Bodega → Buyback / Vendor Cash**, then drag a PC Actor or Token into **Preferred Customer Discounts** and set that character's percentage.
+
+- The discount is stored on that Bodega only.
+- It applies to purchases regardless of the character's Role.
+- It does **not** grant a non-Fixer access to Fixer-only inventory or bypass an item's minimum Operator Rank.
+- If a qualifying Fixer also has a Preferred Customer discount, the better eligible discount wins; the two discounts do not stack.
+- Final pricing is recalculated by the GM-authoritative serialized purchase processor, not trusted from the player UI.
+
+The player shop displays a **Preferred Customer** banner and shows the list price crossed out when the relationship discount is active.
 
 ## Tile binding (v2.2.0)
 
@@ -156,7 +206,11 @@ Cyberpunk RED uses stack quantities such as `system.amount: 10` for many market 
 
 Bodega quantity on the shop side remains package/item quantity. Buying two 10-round packages delivers 20 rounds to the Actor. Grenades and rockets whose source amount is 1 remain single-unit purchases.
 
-## v2.3.4 unverified package safeguard
-Bodega will never use an Actor's **current remaining stack quantity** as proof of the original market package size. For stackable non-ammo Items, automatic buyback is allowed when the package can be verified from Bodega market-package metadata or a resolvable source Item (including compendium/core/duplicate source UUIDs). If a stacked Gear/Drug/etc. has no trustworthy package provenance, the player UI shows **GM REVIEW REQUIRED** and automatic buyback is disabled; the GM-side transaction processor enforces the same rule. This prevents, for example, one remaining cigarette from an unknown 20-pack being valued as an entire market pack.
+## v2.3.4–v2.3.11 unverified package safeguard and GM review
+Bodega will never use an Actor's **current remaining stack quantity** as proof of the original market package size. For stackable non-ammo Items, automatic buyback is allowed when the package can be verified from Bodega market-package metadata or a resolvable source Item (including compendium/core/duplicate source UUIDs). If a stacked Gear/Drug/etc. has no trustworthy package provenance, the player UI shows **GM REVIEW REQUIRED**. This prevents, for example, one remaining cigarette from an unknown 20-pack being valued as an entire market pack.
+
+As of v2.3.9, **GM Review is actionable** rather than a dead-end safety label. v2.3.10 refines that review window into a wider, resizable two-column layout with a responsive narrow-screen fallback. v2.3.11 makes the approval control explicitly interactive even when required package data is missing: clicking it focuses/highlights the missing field and explains what the GM must enter instead of silently doing nothing. The player selects how many units they want to sell and clicks **GM Review**. The active GM receives a Bodega-styled review dialog and must explicitly enter the original **units per market package** while verifying the package's market price. The dialog previews the exact buyback and refuses approval if it would be worth less than 1eb or exceed the vendor's current cash.
+
+An approved review uses the normal serialized GM-authoritative buyback transaction. By default the reviewed package definition is stamped onto any remaining Actor stack, so later partial sales can be valued automatically. Cancelling or closing the GM review moves no inventory and no eurobucks; an open review stays pending until the GM makes a decision. Players cannot supply or spoof the trusted package override themselves; only the active GM review dialog can create it.
 
 Atomic Items with no stack field remain ordinary single items. CPR ammo keeps the established conservative fallback rules when source metadata is missing: grenade/rocket 1, battery 8 (or an explicit description count), other standard ammo 10.
