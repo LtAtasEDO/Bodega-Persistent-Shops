@@ -1,5 +1,82 @@
 # Bodega™ Changelog
 
+## 2.3.13
+- Fixed **Specific Token Override** binding after live Foundry v12 validation showed Canvas Token drags could arrive at the Edit Bodega HTML drop zone using Actor-shaped/non-`Token` drag payloads.
+- Specific Token drops now use Foundry's `TextEditor.getDragEventData()` parser first, accept embedded Token UUID / scene+token identifier variants, and safely resolve an Actor-shaped Canvas drag to the exact Token when exactly one matching Token is controlled.
+- Added **Bind Selected Token** beside the Specific Token Override drop zone as a deterministic fallback: select exactly one placed NPC Token on the Scene and bind that exact Scene Token without relying on browser drag payload shape.
+- Specific Token identity remains Scene+Token specific and continues to override Actor-wide vendor bindings.
+- Corrected Edit Bodega ledger wording from **Ledger (Container/NPC)** to **Ledger (Container/Player)**, including drop-zone/help/warning text. Ledger behavior itself is unchanged.
+
+## 2.3.12
+- Hardened the live player **Ctrl/Cmd + Left Click** vendor interaction after server validation showed the PIXI-stage listener could disappear or be swallowed even though no v2.3.10/v2.3.11 code changed that feature.
+- Player vendor access now binds primarily to the actual Foundry HTML canvas/board pointer event in capture phase and hit-tests visible Token renderer bounds, so unowned vendor NPCs remain reachable even when another module or Token layer stops PIXI propagation.
+- The existing PIXI-stage listener is retained as a secondary fallback for renderer/canvas configurations where the HTML board element cannot be resolved.
+- Added duplicate-event suppression so the DOM and PIXI paths cannot open the same Bodega twice from one gesture.
+- Only the configured modifier-click over a Bodega-bound Token is consumed; Ctrl/Cmd-clicks on unrelated Tokens or empty canvas space continue to pass through untouched.
+- Player interaction automatically rebinds when the Bodega interaction setting changes and on every `canvasReady` event.
+- Added `game.bodega.rebindVendorInteraction()` as a troubleshooting/helper API without changing GM Token HUD, vendor bindings, shop transactions, or the v2.3.11 GM Buyback Review behavior.
+
+## 2.3.11
+- Fixed confusing **GM Buyback Review** approval behavior found in live validation: the Approve button was silently disabled until **Units per market package** was entered, which made the working review handler look broken.
+- **Approve Buyback** now always responds. If package size is missing/invalid it warns the GM, focuses and highlights the required field, and leaves the review open.
+- Added a visible **Required** marker and clearer examples for market package size (1 single item, 10-round ammo box, 20-count cigarette pack).
+- The offer preview and button readiness still update live, but only the short processing window uses the native disabled state.
+- Invalid sub-1eb offers and insufficient vendor cash now return explicit GM notifications instead of an inert approval control.
+- No transaction math, package provenance, serialized buyback, vendor-purse, or player/GM authority behavior changed.
+
+## 2.3.10
+- Refined the **GM Buyback Review** dialog after live validation showed the v2.3.9 form was opening at Foundry's default narrow Dialog width and clipping the package fields.
+- Moved Dialog sizing into the proper Foundry v12 application-options argument and set the review window to a resizable 720px default width.
+- Rebuilt the review content with a compact two-column summary, two-column market-package form, full-width offer preview, wrapped remember-definition control, and cleaner approval spacing.
+- Added responsive one-column fallback styling for narrower displays while preserving the same serialized GM-authoritative review/approval transaction behavior.
+
+## 2.3.9
+- Fixed the **GM Review** control for unverified stacked-item buybacks; it was previously rendered as a disabled safety label with no actionable workflow.
+- Players can now choose the quantity they want reviewed and click **GM Review**. The request is sent only to the active GM; no item or eurobucks move until GM approval.
+- Added a dark Bodega-styled **GM Buyback Review** dialog showing seller, item, current Actor stack, requested quantity, buyback percentage, and available vendor cash.
+- The GM must explicitly enter **Units per market package** and can verify/edit the market package price. Bodega never pre-assumes the Actor's current remaining stack is the original package size.
+- The review dialog previews the exact whole-eb offer and prevents approval when the offer is below 1eb or exceeds the vendor purse/linked ledger balance.
+- Approved reviews run through the same per-Bodega serialized GM-authoritative buyback queue as normal sales, preserving purse, ledger, trade-in, package, and rollback protections.
+- By default, a GM-approved package definition is remembered on any remaining Actor stack so future partial buybacks do not require repeated review.
+- Review cancellation/closing returns a clean failure to the player and leaves both inventory and money untouched; an open review stays pending until the GM decides.
+
+## 2.3.8
+- Fixed player vendor opening for **unowned NPC Tokens**. v2.3.7 wrapped Foundry's Token click handler, but players without ownership can be prevented from reaching that control path at all.
+- Player vendor interaction now listens at the **canvas pointer layer** and hit-tests visible Tokens under the cursor, so no Actor/Token ownership is required.
+- Changed the default/recommended gesture to **Ctrl/Cmd + Left Click** after live Foundry validation showed Shift-click is already used for multi-Token selection and Alt-click is used for Token highlighting.
+- Shift/Alt remain optional compatibility choices with conflict warnings; Disabled still leaves the GM Token HUD storefront path intact.
+- Only the configured gesture over an actual Bodega-bound vendor is consumed. Normal clicks, modifier-clicks on unrelated Tokens, and modifier-clicks on empty canvas space pass through untouched.
+- Specific Token Night Market overrides still take priority over Actor-wide vendor bindings. GM Token HUD behavior and all shop transaction logic are unchanged.
+
+## 2.3.7
+- Added configurable **Player Vendor Token Interaction** under **Configure Game Settings → Bodega** so players can open bound NPC vendors without Actor/Token ownership.
+- Default player gesture is **Shift + Left Click**; alternate **Alt + Left Click**, **Ctrl/Cmd + Left Click**, and **Disabled — GM Token HUD only** modes are available.
+- Normal unmodified Token clicks are never intercepted, preserving targeting and other Token interactions.
+- Player interaction resolves the same specific-Token-first / Actor-wide-second vendor binding used by the GM Token HUD and opens the normal serialized Bodega shop path.
+- Player vendor interaction is gated by the existing scene-only availability rules and uses the player's controlled customer Actor or assigned Character; no ownership is granted on the NPC vendor.
+- Added a libWrapper-compatible Token click wrapper with a standalone fallback so Bodega does not require libWrapper to provide player vendor access.
+- GM Token HUD storefront controls from v2.3.6 remain unchanged and are always available regardless of the player-interaction setting.
+
+## 2.3.6
+- Added per-Bodega **Vendor Token / Actor HUD Binding** in Edit Bodega.
+- Actor-wide bindings make every placed Token using that Actor resolve to the configured Bodega.
+- Specific Token bindings affect only that exact Token on that Scene and take priority over Actor-wide bindings, allowing one NPC appearance to run a different booth/shop.
+- Bound vendor Tokens receive an **Open Bodega** storefront button in Foundry's Token HUD when the HUD is rendered.
+- Vendor HUD opening excludes the vendor Token from customer selection and falls back to the user's assigned Character, preventing the NPC shopkeeper from accidentally becoming the buyer.
+- Scene-only Bodega restrictions remain enforced for players; GMs retain their existing preview/access behavior.
+- Binding conflicts are hardened: an Actor-wide vendor can belong to only one Actor-wide Bodega at a time, and an exact Token can belong to only one Token-specific Bodega at a time.
+- Added `game.bodega.openVendorToken(token)` and `game.bodega.resolveVendorToken(token)` API helpers.
+- Bodega Manager cards now summarize Actor/Token HUD binding counts alongside Tile bindings.
+- Scoped Face-chip removal handling so Vendor binding chips cannot accidentally remove a shop portrait when their own remove button is clicked.
+
+## 2.3.5
+- Added per-Bodega **Preferred Customer Discounts** for specific Actors/Tokens, intended for relationship/job rewards regardless of Role.
+- Preferred customers are configured in **Edit Bodega → Buyback / Vendor Cash** by dropping a PC Actor/Token and setting a 0–100% purchase discount.
+- Preferred-customer pricing applies to all normally accessible stock at that Bodega, but never bypasses Fixer-only visibility or minimum Operator Rank requirements.
+- If a Fixer also has a preferred-customer discount, Bodega uses the better eligible discount instead of stacking percentages.
+- The GM-authoritative serialized purchase path recalculates the preferred-customer discount server-side, so the player UI cannot spoof a discounted price.
+- Player shop UI shows a **Preferred Customer** banner and crossed-out list pricing when the relationship discount applies.
+
 ## 2.3.4
 - Added defensive package-provenance validation for buybacks of stackable non-ammo Items such as cigarette packs, multi-dose Drugs, and other Gear using `system.amount`/stack fields.
 - Bodega-stamped package metadata and resolvable source Items remain authoritative; `_stats.duplicateSource` is also accepted as a traceable source UUID.
