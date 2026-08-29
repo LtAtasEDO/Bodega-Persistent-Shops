@@ -1,8 +1,9 @@
 {
   "id": "bodega",
   "title": "Bodega™ Persistent Shops",
-  "description": "Persistent Cyberpunk RED bodegas with protected vendor purses/actor ledgers, serialized GM-authoritative purchases and live stock updates, package-aware proportional buybacks for ammo/stacked goods with unverified-stack GM-review protection, Fixer/Operator pricing and optional automatic high-price Fixer gating, static + dynamic inventory, multiple RollTable/pack sources, Simple Calendar customer traffic and daily restocking, scrollable curated-source search, direct Monk's Active Tile binding, and a tile-friendly API.",
-  "version": "2.3.4",
+  "description": "Persistent Cyberpunk RED bodegas with protected vendor purses/actor ledgers, serialized GM-authoritative purchases and live stock updates, Actor-wide and specific-Token vendor bindings with canvas-level configurable player modifier-click access plus GM Token HUD controls, per-Bodega preferred-customer discounts for specific Actors regardless of Role, package-aware proportional buybacks for ammo/stacked goods with an active-GM review/approval workflow for unverified stacks, Fixer/Operator pricing and optional automatic high-price Fixer gating, static + dynamic inventory, multiple RollTable/pack sources, Simple Calendar customer traffic and daily restocking, scrollable curated-source search, direct Monk's Active Tile binding, and a tile-friendly API.",
+  "url": "https://github.com/LtAtasEDO/Bodega-Persistent-Shops",
+  "version": "2.3.13",
   "authors": [
     {
       "name": "Lt Atlas"
@@ -27,11 +28,13 @@
     "recommends": [
       {
         "id": "foundryvtt-simple-calendar",
-        "type": "module"
+        "type": "module",
+        "compatibility": {}
       },
       {
         "id": "monks-active-tiles",
-        "type": "module"
+        "type": "module",
+        "compatibility": {}
       }
     ]
   },
@@ -39,5 +42,7 @@
     "scripts/bodega.js"
   ],
   "socket": true,
+  "manifest": "https://github.com/LtAtasEDO/Bodega-Persistent-Shops/releases/latest/download/module.json",
+  "download": "https://github.com/LtAtasEDO/Bodega-Persistent-Shops/releases/download/bodega-v2.3.13/module.zip",
   "readme": "README.md"
 }
