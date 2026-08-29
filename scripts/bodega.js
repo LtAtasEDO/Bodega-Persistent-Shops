@@ -1,5 +1,5 @@
 /**
- * Bodega™ Persistent Shops — Foundry VTT Module v2.3.4
+ * Bodega™ Persistent Shops — Foundry VTT Module v2.3.13
  *
  * Ported from the Bodega™ v2.0.3 / v2.0.3c macros for Foundry VTT 12.
  * Keeps the existing world setting namespace (bodega.db) so configured shops migrate in place.
@@ -9,7 +9,7 @@
 "use strict";
 
 const MODULE_ID = "bodega";
-const MODULE_VERSION = "2.3.4";
+const MODULE_VERSION = "2.3.13";
 const SOCKET = `module.${MODULE_ID}`;
 let isGM = false;
 let sceneId = null;
@@ -91,6 +91,11 @@ function bindBodegaBridge() {
       const purseNow = Number(ledger.system?.wealth?.value|0);
       game.socket.emit(SOCKET, {op:"purse-ui", id:msg.id, purse:purseNow});
       game.socket.emit(SOCKET, {op:"purse-ack", id:msg.id, purse:purseNow});
+      return;
+    }
+
+    if (msg.op === "gm-buyback-review") {
+      await openGMReviewBuyback(msg.payload);
       return;
     }
 
@@ -343,7 +348,8 @@ async function giveFromShopQty(actor, shopItem, qty=1){
 
 const STORE_NS = "bodega";
 const STORE_KEY = "db";
-const FLAG_VER  = 5; // v5 adds market-package metadata for safe proportional buybacks
+const PLAYER_VENDOR_INTERACTION_KEY = "playerVendorInteraction";
+const FLAG_VER  = 7; // v7 adds Actor-wide and specific-Token vendor HUD bindings
 
 // -------------------- tiny utils --------------------
 const esc = (s="") => String(s)
@@ -412,8 +418,201 @@ async function withBodegaShopQueue(shopId, task){
   try { return await current; }
   finally { if (bodegaShopQueues.get(key) === current) bodegaShopQueues.delete(key); }
 }
-async function gmProcessBuyback(payload){
-  return withBodegaShopQueue(payload?.shopId, () => gmProcessBuybackUnlocked(payload));
+async function gmProcessBuyback(payload, reviewOverride=null){
+  return withBodegaShopQueue(payload?.shopId, () => gmProcessBuybackUnlocked(payload, reviewOverride));
+}
+
+/** Active-GM review flow for an unverified stacked Item. The player never supplies the
+ * trusted package override; only the GM dialog can create it locally. */
+async function openGMReviewBuyback(payload, localResultCallback=null){
+  const sendResult = (result) => {
+    if (typeof localResultCallback === "function") {
+      try { localResultCallback(result); } catch (error) { console.error("Bodega | Local GM review callback failed", error); }
+      return;
+    }
+    game.socket.emit(SOCKET, {
+      op:result?.ok ? "buyback-done" : "buyback-failed",
+      id:payload?.shopId,
+      nonce:payload?.nonce,
+      userId:payload?.userId || null,
+      message:result?.message || (result?.ok ? "GM-approved buyback completed." : "The GM did not approve that buyback.")
+    });
+  };
+
+  if (!game.user?.isGM) {
+    const result = {ok:false, message:"Only a GM can review this buyback."};
+    sendResult(result);
+    return result;
+  }
+
+  window.__bodegaReviewOpen ||= new Set();
+  if (payload?.nonce && window.__bodegaReviewOpen.has(payload.nonce)) return {ok:false, duplicate:true};
+  if (payload?.nonce) window.__bodegaReviewOpen.add(payload.nonce);
+
+  const db = await loadAll();
+  const shop = db.shops?.[payload?.shopId];
+  const seller = payload?.sellerUuid ? await fromUuid(payload.sellerUuid) : null;
+  let item = seller?.items?.get?.(payload?.itemId) || null;
+  if (!item && seller && payload?.itemName) item = seller.items.find(i => i.name === payload.itemName);
+
+  const failEarly = (message) => {
+    if (payload?.nonce) window.__bodegaReviewOpen.delete(payload.nonce);
+    const result = {ok:false, message};
+    sendResult(result);
+    ui.notifications.warn(message);
+    return result;
+  };
+  if (!shop) return failEarly("Bodega not found for GM review.");
+  if (!seller) return failEarly("Seller not found for GM review.");
+  if (!item) return failEarly("The item is no longer on the seller's Actor.");
+
+  const kind = getItemKind(item);
+  const bb = shop.buyback?.[kind] || {on:false, pct:0};
+  if (!bb.on) return failEarly("This Bodega is not buying that item category right now.");
+  const rank = getFixerRank(seller);
+  const cfg = db.defaults?.fixerDiscounts ?? defaultDB().defaults.fixerDiscounts;
+  const finalPct = applyFixerBonusToSell(bb.pct|0, rank, cfg);
+  const have = readStackQty(item);
+  const qty = Math.max(1, Math.min(have, Number(payload?.qty|0) || 1));
+  const itemMarket = Math.max(0, getItemMarketValue(item)|0);
+  const ledger = await resolveLedger(shop);
+  const vendorCash = ledger ? Math.max(0, Number(ledger.system?.wealth?.value|0)) : Math.max(0, Number(shop.purse|0));
+  const bodyId = makeUiId("buyback-review");
+  const accent = db.era2045 ? "#E64539" : "#00FFF7";
+  const style = document.createElement("style");
+  style.textContent = makeAdminCSS(accent, bodyId);
+  let finished = false;
+
+  const content = `
+  <div id="${bodyId}">
+    <div class="wrap buyback-review-wrap">
+      <div class="title">GM Buyback Review</div>
+
+      <div class="card review-summary">
+        <div class="review-summary-grid">
+          <div class="review-stat"><span>Seller</span><b>${esc(seller.name)}</b></div>
+          <div class="review-stat"><span>Item</span><b>${esc(item.name)}</b></div>
+          <div class="review-stat"><span>Current Actor Stack</span><b>${have}</b></div>
+          <div class="review-stat"><span>Requested Sale</span><b>${qty}</b></div>
+          <div class="review-stat"><span>Vendor Buyback Rate</span><b>${finalPct}%</b></div>
+          <div class="review-stat"><span>Vendor Cash</span><b>${vendorCash} eb</b></div>
+        </div>
+      </div>
+
+      <div class="card review-package-card">
+        <div class="review-help">
+          Bodega could not trace this stack to a source Item. Enter the <b>original market package</b> below.
+          The current Actor stack is never assumed to be the original package size.
+        </div>
+
+        <div class="review-fields">
+          <label class="review-field">
+            <span>Market package price (eb)</span>
+            <input data-review-price type="number" min="0" step="1" value="${itemMarket}">
+          </label>
+          <label class="review-field">
+            <span>Units per market package <em class="review-required">Required</em></span>
+            <input data-review-size type="number" min="1" step="1" placeholder="e.g. 1, 10, 20" aria-required="true">
+          </label>
+        </div>
+
+        <label class="review-remember">
+          <input data-review-remember type="checkbox" checked>
+          <span>Remember this package definition on any remaining Actor stack</span>
+        </label>
+
+        <div class="card review-preview" data-review-preview><b>Required:</b> enter the original units per market package to calculate the offer.</div>
+
+        <div class="review-actions">
+          <button type="button" class="btn review-approve" data-review-approve aria-disabled="true"><i class="fas fa-check"></i> Approve Buyback</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+  const dlg = new Dialog({
+    title:`Bodega™ — Review ${item.name}`,
+    content,
+    buttons:{ cancel:{label:"Cancel Review"} },
+    render:(html)=>{
+      document.head.appendChild(style);
+      const app = html[0].closest(".app");
+      app?.classList.add(`dialog-host-${bodyId}`);
+      forceFooterButtons(app, accent);
+      const root = html[0].querySelector(`#${bodyId}`);
+      const priceInput = root?.querySelector("[data-review-price]");
+      const sizeInput = root?.querySelector("[data-review-size]");
+      const rememberInput = root?.querySelector("[data-review-remember]");
+      const preview = root?.querySelector("[data-review-preview]");
+      const approve = root?.querySelector("[data-review-approve]");
+
+      const reviewState = () => {
+        const priceRaw = Number(priceInput?.value || 0);
+        const price = Math.max(0, Math.floor(Number.isFinite(priceRaw) ? priceRaw : 0));
+        const sizeRaw = Number(sizeInput?.value || 0);
+        const size = Math.floor(sizeRaw);
+        const validSize = Number.isFinite(sizeRaw) && sizeRaw >= 1 && sizeRaw === size;
+        const total = validSize ? proportionalBuybackTotal(price, finalPct, qty, size) : 0;
+        const cashOkay = total <= vendorCash;
+        return {price, size, validSize, total, cashOkay};
+      };
+
+      const refresh = () => {
+        const {price, size, validSize, total, cashOkay} = reviewState();
+        sizeInput?.classList.toggle("review-invalid", !validSize && !!String(sizeInput?.value || "").trim());
+        if (preview) {
+          if (!validSize) preview.innerHTML = '<b>Required:</b> enter a whole-number market package size of <b>1 or more</b>. Example: 1 for a single item, 10 for a ten-round ammo box, or 20 for a pack of cigarettes.';
+          else if (total <= 0) preview.innerHTML = `Reviewed package: <b>${size}</b> unit${size===1?'':'s'} for <b>${price}</b> eb. This requested quantity produces <b>less than 1 eb</b> at ${finalPct}%.`;
+          else if (!cashOkay) preview.innerHTML = `Offer would be <b>${total} eb</b>, but the vendor only has <b>${vendorCash} eb</b>.`;
+          else preview.innerHTML = `Reviewed package: <b>${size}</b> unit${size===1?'':'s'} for <b>${price}</b> eb → seller receives <b>${total} eb</b> for ${qty} unit${qty===1?'':'s'} at ${finalPct}%.`;
+        }
+        if (approve) {
+          const ready = validSize && total > 0 && cashOkay;
+          approve.setAttribute("aria-disabled", ready ? "false" : "true");
+          approve.classList.toggle("review-ready", ready);
+          approve.title = ready ? "Approve this reviewed buyback" : "Click to see what information is still required";
+        }
+      };
+      priceInput?.addEventListener("input", refresh);
+      sizeInput?.addEventListener("input", refresh);
+      refresh();
+
+      approve?.addEventListener("click", async () => {
+        const {price:marketPrice, size:packageSize, validSize, total, cashOkay} = reviewState();
+        if (!validSize) {
+          sizeInput?.classList.add("review-invalid");
+          sizeInput?.focus();
+          return ui.notifications.warn("Enter the original Units per market package before approving this buyback.");
+        }
+        if (total <= 0) {
+          priceInput?.focus();
+          return ui.notifications.warn("That package definition produces a buyback worth less than 1 eb. Verify the market package price and size.");
+        }
+        if (!cashOkay) return ui.notifications.warn(`This vendor only has ${vendorCash} eb and cannot cover the ${total} eb reviewed offer.`);
+        approve.disabled = true;
+        approve.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing';
+        const result = await gmProcessBuyback(payload, {
+          approved:true, packageSize, marketPrice, remember:!!rememberInput?.checked
+        });
+        finished = true;
+        if (payload?.nonce) window.__bodegaReviewOpen.delete(payload.nonce);
+        sendResult(result);
+        if (result?.ok) ui.notifications.info(`Approved ${item.name} buyback for ${result.total|0} eb.`);
+        else ui.notifications.warn(result?.message || "The reviewed buyback could not be completed.");
+        dlg.close();
+      });
+    },
+    close:()=>{
+      cleanupDialogVisuals(style);
+      if (payload?.nonce) window.__bodegaReviewOpen.delete(payload.nonce);
+      if (!finished) sendResult({ok:false, message:"GM review was cancelled. Nothing was sold or paid."});
+    }
+  }, {
+    width:720,
+    resizable:true
+  });
+  dlg.render(true);
+  return {ok:true, pending:true};
 }
 
 const bodegaPurchaseResults = new Map();
@@ -470,7 +669,8 @@ async function gmProcessPurchaseUnlocked(payload){
   if (qty <= 0) return fail(`${item.name} is sold out.`);
 
   const discCfg = db.defaults?.fixerDiscounts ?? defaultDB().defaults.fixerDiscounts;
-  const each = priceWithFixerBuyDiscount(item.price|0, fixer, rank, discCfg, !!item.fixerOnly);
+  const pricing = bodegaBuyPricing(item.price|0, shop, buyer, fixer, rank, discCfg, !!item.fixerOnly);
+  const each = pricing.price;
   const total = Math.max(0, each * qty);
   const funds = Math.max(0, Number(buyer.system?.wealth?.value ?? 0));
   if (total > funds) return fail(`${buyer.name} can’t afford ${item.name} ×${qty} (${total} eb).`);
@@ -538,7 +738,7 @@ async function gmProcessPurchaseUnlocked(payload){
 }
 
 /** GM-only: process one sell approval payload inside the per-shop queue. */
-async function gmProcessBuybackUnlocked(payload){
+async function gmProcessBuybackUnlocked(payload, reviewOverride=null){
   const fail = (message, level="warn") => {
     ui.notifications?.[level]?.(message);
     return {ok:false, message};
@@ -567,9 +767,35 @@ async function gmProcessBuybackUnlocked(payload){
   const bb = shop.buyback?.[kind] || {on:false, pct:0};
   if (!bb.on) return fail("Vendor is not buying that category right now.");
 
-  const packageInfo = await resolveMarketPackageInfo(item);
+  let packageInfo = await resolveMarketPackageInfo(item);
+  if (!packageInfo.verified && reviewOverride?.approved === true) {
+    const reviewedSize = Math.max(1, Number(reviewOverride.packageSize || 0) | 0);
+    const reviewedPrice = Math.max(0, Number(reviewOverride.marketPrice ?? getItemMarketValue(item)) | 0);
+    if (!reviewedSize) return fail("GM review did not provide a valid market package size.");
+    packageInfo = {
+      ...packageInfo,
+      packageSize:reviewedSize,
+      marketPrice:reviewedPrice,
+      verified:true,
+      provenance:"gm-review",
+      requiresReview:false
+    };
+    if (reviewOverride.remember !== false) {
+      try {
+        await item.update({[`flags.${MODULE_ID}.marketPackage`]: {
+          size:reviewedSize,
+          price:reviewedPrice,
+          sourceUuid:sourceUuidForMarketPackage(item) || null,
+          reviewedBy:game.user?.id || null,
+          reviewedAt:Date.now()
+        }});
+      } catch (error) {
+        console.warn("Bodega | Could not remember GM-reviewed market package metadata", error);
+      }
+    }
+  }
   if (!packageInfo.verified) {
-    return fail("Bodega cannot verify this stacked item's original market package size. GM review required; handle this buyback manually.");
+    return fail("Bodega cannot verify this stacked item's original market package size. GM review required.");
   }
   const baseValue = packageInfo.marketPrice;
   const packageSize = packageInfo.packageSize;
@@ -729,6 +955,449 @@ function normalizeDynamicSettings(value){
   dynamic.lastProcessed = Number(dynamic.lastProcessed || 0);
   return dynamic;
 }
+function normalizeCustomerDiscounts(value){
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of value){
+    if (!entry) continue;
+    const actorUuid = String(entry.actorUuid || entry.uuid || "").trim();
+    const actorId = String(entry.actorId || "").trim();
+    if (!actorUuid && !actorId) continue;
+    const key = actorUuid || actorId;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      actorUuid,
+      actorId,
+      name:String(entry.name || "Preferred Customer"),
+      img:String(entry.img || "icons/svg/mystery-man.svg"),
+      pct:Math.max(0, Math.min(100, Number(entry.pct|0) || 0))
+    });
+  }
+  return out;
+}
+function getPreferredCustomerDiscount(shop, actor){
+  if (!shop || !actor) return null;
+  const actorUuid = String(actor.uuid || "");
+  const actorId = String(actor.id || "");
+  const hit = normalizeCustomerDiscounts(shop.customerDiscounts).find(entry =>
+    (entry.actorUuid && entry.actorUuid === actorUuid) ||
+    (entry.actorId && entry.actorId === actorId)
+  );
+  return hit || null;
+}
+
+// -------------------- Vendor Token / Actor HUD bindings --------------------
+function normalizeVendorActors(value){
+  if (!Array.isArray(value)) return [];
+  const out = []; const seen = new Set();
+  for (const entry of value){
+    if (!entry) continue;
+    const actorId = String(entry.actorId || "").trim();
+    const actorUuid = String(entry.actorUuid || entry.uuid || "").trim();
+    if (!actorId && !actorUuid) continue;
+    const key = actorId || actorUuid;
+    if (seen.has(key)) continue; seen.add(key);
+    out.push({
+      actorId, actorUuid,
+      name:String(entry.name || "Vendor Actor"),
+      img:String(entry.img || "icons/svg/mystery-man.svg")
+    });
+  }
+  return out;
+}
+function normalizeVendorTokens(value){
+  if (!Array.isArray(value)) return [];
+  const out = []; const seen = new Set();
+  for (const entry of value){
+    if (!entry) continue;
+    const tokenUuid = String(entry.tokenUuid || entry.uuid || "").trim();
+    const tokenId = String(entry.tokenId || "").trim();
+    const boundSceneId = String(entry.sceneId || "").trim();
+    if (!tokenUuid && !(boundSceneId && tokenId)) continue;
+    const key = tokenUuid || `${boundSceneId}:${tokenId}`;
+    if (seen.has(key)) continue; seen.add(key);
+    out.push({
+      tokenUuid, tokenId, sceneId:boundSceneId,
+      actorId:String(entry.actorId || ""),
+      actorUuid:String(entry.actorUuid || ""),
+      name:String(entry.name || "Vendor Token"),
+      sceneName:String(entry.sceneName || ""),
+      img:String(entry.img || "icons/svg/mystery-man.svg")
+    });
+  }
+  return out;
+}
+function vendorTokenDocument(tokenLike){
+  if (!tokenLike) return null;
+  if (tokenLike.documentName === "Token") return tokenLike;
+  if (tokenLike.document?.documentName === "Token") return tokenLike.document;
+  if (tokenLike.object?.documentName === "Token") return tokenLike.object.document;
+  if (tokenLike.document?.object?.documentName === "Token") return tokenLike.document.object.document;
+  return null;
+}
+function bodegaDragEventData(event){
+  // Foundry v12 can emit different drag payload shapes depending on whether the
+  // source is a Sidebar document, a sheet element, or a Canvas placeable. Use
+  // Foundry's parser first, then retain the legacy text/plain fallback.
+  try {
+    const parsed = globalThis.TextEditor?.getDragEventData?.(event);
+    if (parsed && typeof parsed === "object" && Object.keys(parsed).length) return parsed;
+  } catch(_){}
+  try {
+    const raw = event?.dataTransfer?.getData?.("text/plain");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch(_) { return null; }
+}
+async function resolveSpecificVendorTokenDrop(data){
+  if (!data) return null;
+
+  // Prefer an explicit embedded Token UUID when Foundry gives us one. Some
+  // module drag payloads use tokenUuid/documentUuid instead of uuid.
+  const uuidCandidates = [data.tokenUuid, data.documentUuid, data.uuid, data.sourceUuid]
+    .map(v => String(v || "").trim()).filter(Boolean);
+  for (const uuid of uuidCandidates){
+    if (!/(^|\.)Token\./.test(uuid) && !/^Scene\.[^.]+\.Token\./.test(uuid)) continue;
+    try {
+      const doc = await fromUuid(uuid);
+      const token = vendorTokenDocument(doc);
+      if (token) return token;
+    } catch(_){}
+  }
+
+  // Accept explicit scene/token identifiers used by Canvas/placeable payloads.
+  const tokenId = String(data.tokenId || data.tokenID || (data.type === "Token" ? (data.id || data._id) : "") || "").trim();
+  const droppedSceneId = String(data.sceneId || data.sceneID || data.parentId || data.parentID || canvas?.scene?.id || sceneId || "").trim();
+  if (tokenId && droppedSceneId){
+    try {
+      const doc = await fromUuid(`Scene.${droppedSceneId}.Token.${tokenId}`);
+      const token = vendorTokenDocument(doc);
+      if (token) return token;
+    } catch(_){}
+  }
+
+  // Live Foundry v12 can report a Canvas Token drag as its represented Actor.
+  // If exactly one Token is controlled, safely resolve that exact placed Token
+  // when it represents the Actor in the drag payload. This avoids guessing when
+  // multiple copies of the same NPC are selected.
+  const controlled = Array.from(canvas?.tokens?.controlled || [])
+    .map(t => vendorTokenDocument(t)).filter(Boolean);
+  if (controlled.length === 1){
+    const selected = controlled[0];
+    const selectedActorId = String(selected.actorId || selected.actor?.id || "");
+    const selectedActorUuid = String((selectedActorId ? game.actors?.get(selectedActorId)?.uuid : null) || selected.actor?.uuid || "");
+    const payloadActorId = String(data.actorId || (data.type === "Actor" ? (data.id || data._id) : "") || "");
+    const payloadActorUuid = String(data.actorUuid || (data.type === "Actor" ? data.uuid : "") || "");
+    const actorMatches =
+      (payloadActorId && selectedActorId && payloadActorId === selectedActorId) ||
+      (payloadActorUuid && selectedActorUuid && payloadActorUuid === selectedActorUuid);
+    if (actorMatches) return selected;
+  }
+  return null;
+}
+function vendorBindingShopAvailable(shop){
+  if (!shop) return false;
+  if (game.user?.isGM) return true;
+  if (!shop.sceneOnly) return true;
+  const currentSceneId = canvas?.scene?.id || sceneId || "";
+  return !shop.sceneId || !currentSceneId || String(shop.sceneId) === String(currentSceneId);
+}
+function resolveBodegaForVendorTokenFromDb(tokenLike, db, {includeUnavailable=false}={}){
+  const token = vendorTokenDocument(tokenLike);
+  if (!token) return null;
+  const shops = Object.values(db?.shops || {});
+  const tokenUuid = String(token.uuid || "");
+  const tokenId = String(token.id || token._id || "");
+  const tokenSceneId = String(token.parent?.id || token.parent?._id || canvas?.scene?.id || "");
+
+  // Exact Token bindings always win. This lets one appearance of an otherwise
+  // Actor-bound vendor run a different booth/Bodega on a specific Scene.
+  for (const shop of shops){
+    if (!includeUnavailable && !vendorBindingShopAvailable(shop)) continue;
+    const hit = normalizeVendorTokens(shop.vendorTokens).find(entry =>
+      (entry.tokenUuid && tokenUuid && entry.tokenUuid === tokenUuid) ||
+      (entry.sceneId && entry.tokenId && entry.sceneId === tokenSceneId && entry.tokenId === tokenId)
+    );
+    if (hit) return {shop, bindingType:"token", binding:hit, token};
+  }
+
+  const actorId = String(token.actorId || token.actor?.id || "");
+  const baseActor = actorId ? game.actors?.get(actorId) : null;
+  const actorUuid = String(baseActor?.uuid || token.actor?.uuid || "");
+  for (const shop of shops){
+    if (!includeUnavailable && !vendorBindingShopAvailable(shop)) continue;
+    const hit = normalizeVendorActors(shop.vendorActors).find(entry =>
+      (entry.actorId && actorId && entry.actorId === actorId) ||
+      (entry.actorUuid && actorUuid && entry.actorUuid === actorUuid)
+    );
+    if (hit) return {shop, bindingType:"actor", binding:hit, token};
+  }
+  return null;
+}
+function resolveBodegaForVendorTokenSync(tokenLike, options={}){
+  ensureSetting();
+  const db = game.settings.get(STORE_NS, STORE_KEY);
+  return resolveBodegaForVendorTokenFromDb(tokenLike, db, options);
+}
+async function resolveBodegaForVendorToken(tokenLike, options={}){
+  const token = vendorTokenDocument(tokenLike);
+  if (!token) return null;
+  const db = await loadAll();
+  return resolveBodegaForVendorTokenFromDb(token, db, options);
+}
+function vendorBuyerFromContext(vendorToken=null){
+  const vendorDoc = vendorTokenDocument(vendorToken);
+  const vendorUuid = String(vendorDoc?.uuid || "");
+  const vendorActorId = String(vendorDoc?.actorId || "");
+  const controlled = Array.from(canvas?.tokens?.controlled || []);
+  const customerToken = controlled.find(tok => {
+    const doc = vendorTokenDocument(tok);
+    if (!doc?.actor) return false;
+    if (vendorUuid && String(doc.uuid || "") === vendorUuid) return false;
+    if (vendorActorId && String(doc.actorId || "") === vendorActorId && controlled.length === 1) return false;
+    return game.user?.isGM || doc.actor.isOwner;
+  });
+  return customerToken?.actor || game.user?.character || null;
+}
+async function openShopFromVendorToken(tokenLike){
+  const token = vendorTokenDocument(tokenLike);
+  if (!token) return ui.notifications.warn("Bodega could not resolve that vendor Token.");
+  const match = await resolveBodegaForVendorToken(token);
+  if (!match) return ui.notifications.warn("This Token is not bound to an available Bodega.");
+  return openShop(match.shop.id, {vendorToken:token});
+}
+function ensureVendorHudStyle(){
+  if (document.getElementById("bodega-token-hud-style")) return;
+  const style = document.createElement("style");
+  style.id = "bodega-token-hud-style";
+  style.textContent = `
+    #token-hud .bodega-token-hud i{color:#00fff7;text-shadow:0 0 5px rgba(0,255,247,.45);}
+    #token-hud .bodega-token-hud:hover i{color:#f2d64b;text-shadow:0 0 7px rgba(242,214,75,.5);}
+  `;
+  document.head.appendChild(style);
+}
+function playerVendorInteractionMode(){
+  ensureSetting();
+  return String(game.settings.get(STORE_NS, PLAYER_VENDOR_INTERACTION_KEY) || "ctrl-click");
+}
+function originalPointerEvent(event){
+  return event?.nativeEvent || event?.data?.originalEvent || event?.originalEvent || event;
+}
+function playerVendorGestureMatches(event){
+  if (game.user?.isGM) return false;
+  const mode = playerVendorInteractionMode();
+  if (mode === "disabled") return false;
+  const ev = originalPointerEvent(event) || {};
+  if (ev.button != null && Number(ev.button) !== 0) return false;
+  const shift = !!ev.shiftKey;
+  const alt = !!ev.altKey;
+  const ctrl = !!ev.ctrlKey || !!ev.metaKey;
+  if (mode === "shift-click") return shift && !alt && !ctrl;
+  if (mode === "alt-click") return alt && !shift && !ctrl;
+  if (mode === "ctrl-click") return ctrl && !shift && !alt;
+  return false;
+}
+function consumePlayerVendorGesture(event){
+  const ev = originalPointerEvent(event);
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  event?.stopImmediatePropagation?.();
+  ev?.preventDefault?.();
+  ev?.stopPropagation?.();
+  ev?.stopImmediatePropagation?.();
+}
+function playerVendorCanvasPoint(event){
+  try{
+    if (typeof event?.getLocalPosition === "function" && canvas?.stage) return event.getLocalPosition(canvas.stage);
+    if (typeof event?.data?.getLocalPosition === "function" && canvas?.stage) return event.data.getLocalPosition(canvas.stage);
+  }catch(_err){}
+  const point = event?.global || event?.data?.global || originalPointerEvent(event)?.global;
+  if (!point) return null;
+  const x = Number(point.x); const y = Number(point.y);
+  return Number.isFinite(x) && Number.isFinite(y) ? {x,y} : null;
+}
+function tokenContainsPlayerVendorPoint(tokenObject, point){
+  if (!tokenObject || !point || tokenObject.visible === false || tokenObject.renderable === false) return false;
+  const doc = vendorTokenDocument(tokenObject);
+  if (!doc || (doc.hidden && !game.user?.isGM)) return false;
+  try{
+    const bounds = tokenObject.bounds;
+    if (bounds?.contains) return !!bounds.contains(point.x, point.y);
+  }catch(_err){}
+  const x = Number(doc.x ?? tokenObject.x ?? 0);
+  const y = Number(doc.y ?? tokenObject.y ?? 0);
+  const gridSize = Number(canvas?.grid?.size || canvas?.dimensions?.size || 100);
+  const width = Math.max(1, Number(doc.width || 1)) * gridSize;
+  const height = Math.max(1, Number(doc.height || 1)) * gridSize;
+  return point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height;
+}
+function findPlayerVendorAtCanvasEvent(event){
+  const point = playerVendorCanvasPoint(event);
+  if (!point) return null;
+  const placeables = Array.from(canvas?.tokens?.placeables || []);
+  // Walk from the visually upper end first. We only claim the gesture if the
+  // Token under the pointer actually resolves to a Bodega, so ordinary canvas
+  // clicks remain completely Foundry-owned.
+  for (let i = placeables.length - 1; i >= 0; i--){
+    const tokenObject = placeables[i];
+    if (!tokenContainsPlayerVendorPoint(tokenObject, point)) continue;
+    const token = vendorTokenDocument(tokenObject);
+    const match = resolveBodegaForVendorTokenSync(token);
+    if (match) return {token, match, tokenObject, point};
+  }
+  return null;
+}
+let playerVendorCanvasStage = null;
+let playerVendorCanvasHandler = null;
+let playerVendorCanvasUsesCapture = false;
+let playerVendorDomCanvas = null;
+let playerVendorDomHandler = null;
+let playerVendorLastClaimAt = 0;
+let playerVendorHandledNativeEvents = new WeakSet();
+function playerVendorDomCanvasElement(){
+  const view = canvas?.app?.view || canvas?.app?.renderer?.view;
+  if (view?.addEventListener) return view;
+  const board = document.getElementById("board") || document.querySelector("canvas#board") || document.querySelector("#board canvas");
+  return board?.addEventListener ? board : null;
+}
+function playerVendorRendererPoint(event, element){
+  const ev = originalPointerEvent(event) || event;
+  if (!element?.getBoundingClientRect || !Number.isFinite(Number(ev?.clientX)) || !Number.isFinite(Number(ev?.clientY))) return null;
+  const rect = element.getBoundingClientRect();
+  if (!rect?.width || !rect?.height) return null;
+  const renderer = canvas?.app?.renderer;
+  const screenW = Number(renderer?.screen?.width || element.width || rect.width);
+  const screenH = Number(renderer?.screen?.height || element.height || rect.height);
+  if (!Number.isFinite(screenW) || !Number.isFinite(screenH) || screenW <= 0 || screenH <= 0) return null;
+  return {
+    x:(Number(ev.clientX) - rect.left) * (screenW / rect.width),
+    y:(Number(ev.clientY) - rect.top) * (screenH / rect.height)
+  };
+}
+function findPlayerVendorAtDomEvent(event, element){
+  const point = playerVendorRendererPoint(event, element);
+  if (!point) return null;
+  const placeables = Array.from(canvas?.tokens?.placeables || []);
+  for (let i = placeables.length - 1; i >= 0; i--){
+    const tokenObject = placeables[i];
+    if (!tokenObject || tokenObject.visible === false || tokenObject.renderable === false) continue;
+    const token = vendorTokenDocument(tokenObject);
+    if (!token || (token.hidden && !game.user?.isGM)) continue;
+    let contains = false;
+    try{
+      const bounds = tokenObject.getBounds?.() || tokenObject.bounds;
+      contains = !!bounds?.contains?.(point.x, point.y);
+    }catch(_err){}
+    if (!contains) continue;
+    const match = resolveBodegaForVendorTokenSync(token);
+    if (match) return {token, match, tokenObject, point};
+  }
+  return null;
+}
+function claimPlayerVendorGesture(event){
+  const native = originalPointerEvent(event);
+  try{
+    if (native && typeof native === "object"){
+      if (playerVendorHandledNativeEvents.has(native)) return false;
+      playerVendorHandledNativeEvents.add(native);
+    }
+  }catch(_err){}
+  const now = Number(globalThis.performance?.now?.() || Date.now());
+  if (now - playerVendorLastClaimAt < 120) return false;
+  playerVendorLastClaimAt = now;
+  return true;
+}
+function unbindPlayerVendorCanvasInteraction(){
+  if (playerVendorCanvasStage && playerVendorCanvasHandler){
+    try{
+      if (playerVendorCanvasUsesCapture && typeof playerVendorCanvasStage.removeEventListener === "function"){
+        playerVendorCanvasStage.removeEventListener("pointerdown", playerVendorCanvasHandler, {capture:true});
+      } else if (typeof playerVendorCanvasStage.off === "function") {
+        playerVendorCanvasStage.off("pointerdown", playerVendorCanvasHandler);
+      }
+    }catch(_err){}
+  }
+  if (playerVendorDomCanvas && playerVendorDomHandler){
+    try{ playerVendorDomCanvas.removeEventListener("pointerdown", playerVendorDomHandler, true); }catch(_err){}
+  }
+  playerVendorCanvasStage = null;
+  playerVendorCanvasHandler = null;
+  playerVendorCanvasUsesCapture = false;
+  playerVendorDomCanvas = null;
+  playerVendorDomHandler = null;
+  playerVendorLastClaimAt = 0;
+  playerVendorHandledNativeEvents = new WeakSet();
+}
+function bindPlayerVendorCanvasInteraction(){
+  if (game.user?.isGM) return true;
+  const stage = canvas?.stage || null;
+  const domCanvas = playerVendorDomCanvasElement();
+  if (!stage && !domCanvas) return false;
+  if (playerVendorCanvasStage === stage && playerVendorDomCanvas === domCanvas && (playerVendorCanvasHandler || playerVendorDomHandler)) return true;
+  unbindPlayerVendorCanvasInteraction();
+
+  const openHit = (event, hit) => {
+    if (!hit || !claimPlayerVendorGesture(event)) return false;
+    consumePlayerVendorGesture(event);
+    void openShop(hit.match.shop.id, {vendorToken:hit.token});
+    return true;
+  };
+
+  // Primary path: capture the actual HTML canvas pointer event. This survives
+  // unowned-NPC Token handlers and modules which stop PIXI propagation.
+  if (domCanvas){
+    const domHandler = (event) => {
+      try{
+        if (!playerVendorGestureMatches(event)) return;
+        openHit(event, findPlayerVendorAtDomEvent(event, domCanvas));
+      }catch(err){ console.warn("Bodega | Player vendor DOM-canvas interaction failed", err); }
+    };
+    domCanvas.addEventListener("pointerdown", domHandler, true);
+    playerVendorDomCanvas = domCanvas;
+    playerVendorDomHandler = domHandler;
+  }
+
+  // Secondary path: retain the PIXI stage listener as a fallback for Foundry
+  // renderers where the board element cannot be resolved. Duplicate events are
+  // suppressed by claimPlayerVendorGesture().
+  if (stage){
+    const stageHandler = (event) => {
+      try{
+        if (!playerVendorGestureMatches(event)) return;
+        openHit(event, findPlayerVendorAtCanvasEvent(event));
+      }catch(err){ console.warn("Bodega | Player vendor PIXI interaction failed", err); }
+    };
+    if (typeof stage.addEventListener === "function"){
+      stage.addEventListener("pointerdown", stageHandler, {capture:true});
+      playerVendorCanvasUsesCapture = true;
+      playerVendorCanvasHandler = stageHandler;
+      playerVendorCanvasStage = stage;
+    } else if (typeof stage.on === "function") {
+      stage.on("pointerdown", stageHandler);
+      playerVendorCanvasHandler = stageHandler;
+      playerVendorCanvasStage = stage;
+    }
+  }
+
+  return !!(playerVendorDomHandler || playerVendorCanvasHandler);
+}
+function bodegaBuyPricing(listPrice, shop, actor, isFixer, rank, discCfg, fixerOnlyFlag){
+  const list = Math.max(0, Number(listPrice|0));
+  const fixerPct = (fixerOnlyFlag && isFixer) ? rankToDiscount(rank, discCfg) : 0;
+  const preferred = getPreferredCustomerDiscount(shop, actor);
+  const preferredPct = Math.max(0, Math.min(100, Number(preferred?.pct|0) || 0));
+  // Relationship rewards do not stack with Operator pricing. The better eligible discount wins.
+  const appliedPct = Math.max(fixerPct, preferredPct);
+  return {
+    listPrice:list,
+    price:Math.max(0, Math.round(list * (100 - appliedPct) / 100)),
+    appliedPct, fixerPct, preferredPct, preferred
+  };
+}
+
 function defaultDB(){
   return {
     _ver: FLAG_VER,
@@ -740,13 +1409,30 @@ function defaultDB(){
       autoFixerLock:{ enabled:false, threshold:500 }
     },
     // items: stockClass is static | dynamic | tradein. dynamicManaged is retained for compatibility.
-    // shop:  {id,name,..., faces:[], items:[], dynamic:{...}, purse, buyback:{ [kind]:{on,pct} }, ledgerUuid? }
+    // shop:  {id,name,..., faces:[], vendorActors:[], vendorTokens:[], items:[], dynamic:{...}, purse, customerDiscounts:[], buyback:{ [kind]:{on,pct} }, ledgerUuid? }
     shops:{}
   };
 }
 function ensureSetting(){
   if (!game.settings.settings.get(`${STORE_NS}.${STORE_KEY}`)) {
     game.settings.register(STORE_NS, STORE_KEY, {name:"Bodega DB", scope:"world", config:false, type:Object, default: defaultDB()});
+  }
+  if (!game.settings.settings.get(`${STORE_NS}.${PLAYER_VENDOR_INTERACTION_KEY}`)) {
+    game.settings.register(STORE_NS, PLAYER_VENDOR_INTERACTION_KEY, {
+      name:"Player Vendor Token Interaction",
+      hint:"Choose how players open a Bodega from a bound NPC Token. Normal unmodified clicks remain available for targeting and other Token interactions. GM Token HUD access is always retained.",
+      scope:"world",
+      config:true,
+      type:String,
+      choices:{
+        "ctrl-click":"Ctrl/Cmd + Left Click (Recommended)",
+        "shift-click":"Shift + Left Click (may conflict with multi-Token selection)",
+        "alt-click":"Alt + Left Click (may conflict with Token highlighting)",
+        "disabled":"Disabled — GM Token HUD only"
+      },
+      default:"ctrl-click",
+      onChange:()=>{ try{ bindPlayerVendorCanvasInteraction(); }catch(err){ console.warn("Bodega | Could not rebind player vendor interaction after setting change", err); } }
+    });
   }
 }
 async function loadAll(){
@@ -787,6 +1473,15 @@ async function loadAll(){
 
     // purse
     v.purse = Math.max(0, Number.isFinite(v.purse) ? Number(v.purse|0) : 0);
+
+    // Per-Bodega preferred-customer discounts. These grant price reductions only;
+    // they never bypass Fixer-only visibility/access rules.
+    v.customerDiscounts = normalizeCustomerDiscounts(v.customerDiscounts);
+
+    // Vendor HUD bindings. Actor-wide bindings follow every Token using that Actor;
+    // exact Token bindings are scene-specific overrides and resolve first.
+    v.vendorActors = normalizeVendorActors(v.vendorActors);
+    v.vendorTokens = normalizeVendorTokens(v.vendorTokens);
 
     // Tile bindings. Keep this as an array so one Bodega can appear on multiple scenes.
     v.tileUuids = Array.isArray(v.tileUuids) ? [...new Set(v.tileUuids.filter(Boolean).map(String))] : [];
@@ -935,6 +1630,33 @@ function makeAdminCSS(accent="#00FFF7", bodyId){
 #${bodyId} input[type="number"]{ text-align:right; }
 #${bodyId} .list{ display:flex; flex-direction:column; gap:8px; overflow:visible; padding-right:4px; }
 #${bodyId} .card{ background:var(--panel); border:1px solid var(--accent); border-left:3px solid var(--yellow); border-radius:6px; padding:10px; color:var(--text); }
+/* GM Buyback Review: deliberately wider/cleaner than the generic admin rows. */
+#${bodyId} .buyback-review-wrap{ min-width:0; width:100%; overflow:visible; padding:14px; }
+#${bodyId} .buyback-review-wrap .review-summary{ margin-top:9px; }
+#${bodyId} .review-summary-grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; }
+#${bodyId} .review-stat{ min-width:0; padding:8px 10px; border:1px solid rgba(0,255,247,.22); border-radius:5px; background:#090f13; }
+#${bodyId} .review-stat > span{ display:block; margin-bottom:2px; color:var(--muted); font-size:11px; line-height:1.15; font-weight:800; letter-spacing:.35px; text-transform:uppercase; }
+#${bodyId} .review-stat > b{ display:block; color:var(--text); line-height:1.25; overflow-wrap:anywhere; }
+#${bodyId} .review-package-card{ margin-top:10px; }
+#${bodyId} .review-help{ color:var(--muted); line-height:1.4; margin-bottom:12px; }
+#${bodyId} .review-fields{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:end; }
+#${bodyId} .review-field{ display:block; min-width:0; font-weight:700; }
+#${bodyId} .review-field > span{ display:block; margin-bottom:5px; }
+#${bodyId} .review-required{ display:inline-block; margin-left:5px; padding:1px 5px; border:1px solid rgba(255,222,59,.65); border-radius:999px; color:#ffde3b; font-size:9px; line-height:1.25; font-style:normal; font-weight:900; letter-spacing:.4px; text-transform:uppercase; vertical-align:1px; }
+#${bodyId} .review-field input{ display:block; width:100% !important; min-width:0; }
+#${bodyId} .review-field input.review-invalid{ border-color:#ff6b6b !important; box-shadow:0 0 0 1px rgba(255,107,107,.45), 0 0 8px rgba(255,107,107,.18) !important; }
+#${bodyId} .review-remember{ display:flex; align-items:flex-start; gap:9px; margin-top:12px; line-height:1.3; cursor:pointer; }
+#${bodyId} .review-remember input{ flex:0 0 auto; margin-top:2px; }
+#${bodyId} .review-remember span{ min-width:0; white-space:normal; overflow-wrap:anywhere; }
+#${bodyId} .review-preview{ margin-top:12px; min-height:54px; display:flex; align-items:center; line-height:1.35; border-left-color:var(--accent); background:#081116; }
+#${bodyId} .review-actions{ display:flex; justify-content:flex-end; margin-top:12px; }
+#${bodyId} .review-actions .review-approve{ min-width:190px; }
+#${bodyId} .review-actions .review-approve[aria-disabled="true"]{ opacity:.72; }
+#${bodyId} .review-actions .review-approve.review-ready{ opacity:1; }
+@media (max-width:640px){
+  #${bodyId} .review-summary-grid, #${bodyId} .review-fields{ grid-template-columns:1fr; }
+  #${bodyId} .review-actions .review-approve{ width:100%; }
+}
 #${bodyId} .item-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
 #${bodyId} .item-left{ display:flex; align-items:center; gap:10px; min-width:0; }
 #${bodyId} .thumb{ width:50px; height:50px; border-radius:4px; object-fit:cover; }
@@ -946,6 +1668,18 @@ function makeAdminCSS(accent="#00FFF7", bodyId){
 #${bodyId} .face{ width:28px; height:28px; border-radius:50%; border:1px solid var(--accent); object-fit:cover; }
 #${bodyId} .face-chip{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--accent); border-radius:999px; background:rgba(0,0,0,.4); }
 #${bodyId} .face-chip .x{ font-weight:800; cursor:pointer; }
+#${bodyId} .customer-discount-list{ display:flex; flex-direction:column; gap:6px; margin:8px 0; }
+#${bodyId} .customer-discount-row{ display:grid; grid-template-columns:32px minmax(0,1fr) auto 28px; gap:8px; align-items:center; padding:6px 8px; border:1px solid rgba(0,255,247,.32); border-radius:6px; background:#080d11; }
+#${bodyId} .customer-discount-row .face{ width:30px; height:30px; }
+#${bodyId} .customer-discount-row .customer-name{ min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:800; }
+#${bodyId} .customer-discount-row .discount-control{ display:flex; align-items:center; gap:5px; white-space:nowrap; }
+#${bodyId} .customer-discount-row .customer-discount-pct{ width:68px; }
+#${bodyId} .customer-discount-row .x{ cursor:pointer; font-weight:900; text-align:center; color:var(--muted); }
+#${bodyId} .customer-discount-row .x:hover{ color:var(--yellow); }
+#${bodyId} .vendor-binding-list{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+#${bodyId} .vendor-binding-chip{ max-width:100%; }
+#${bodyId} .vendor-binding-chip .vendor-label{ max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:800; }
+#${bodyId} .vendor-binding-chip .binding-kind{ font-size:9px; padding:1px 5px; margin-left:2px; }
 #${bodyId} .card .del{
   flex:0 0 auto;
   width:36px; height:36px; padding:0;
@@ -2209,10 +2943,13 @@ async function openAdmin() {
       const bound = Array.isArray(v.tileUuids) ? v.tileUuids.length : 0;
       const dyn = normalizeDynamicSettings(v.dynamic);
       const managed = (v.items || []).filter(item => item.dynamicManaged).length;
+      const vendorActorCount = normalizeVendorActors(v.vendorActors).length;
+      const vendorTokenCount = normalizeVendorTokens(v.vendorTokens).length;
+      const vendorHud = vendorActorCount || vendorTokenCount ? ` · HUD ${vendorActorCount ? `${vendorActorCount} Actor${vendorActorCount===1?"":"s"}` : ""}${vendorActorCount && vendorTokenCount ? " + " : ""}${vendorTokenCount ? `${vendorTokenCount} Token${vendorTokenCount===1?"":"s"}` : ""}` : "";
       const dynBadge = dyn.enabled ? `<span class="stock-badge dynamic">Dynamic · ${managed}</span>` : `<span class="stock-badge">Static</span>`;
       return `<div class="card manager-card" data-id="${v.id}">
         <div class="manager-card-head">
-          <div class="manager-summary"><b>${esc(v.name)}</b> ${dynBadge} <span class="muted">#${esc(v.id)}</span><br><span class="muted">${esc(sc)} · ${bound ? `${bound} Tile${bound===1?"":"s"} bound` : "No Tile binding"}</span><br><span class="muted">${esc(dynamicStatusSummary(v))}</span></div>
+          <div class="manager-summary"><b>${esc(v.name)}</b> ${dynBadge} <span class="muted">#${esc(v.id)}</span><br><span class="muted">${esc(sc)} · ${bound ? `${bound} Tile${bound===1?"":"s"} bound` : "No Tile binding"}${vendorHud}</span><br><span class="muted">${esc(dynamicStatusSummary(v))}</span></div>
           <div class="manager-actions">
             <button class="btn" data-bind="${esc(v.id)}"><i class="fas fa-link"></i> Bind Selected</button>
             <button class="btn" data-unbind="${esc(v.id)}"><i class="fas fa-unlink"></i> Unbind Selected</button>
@@ -2306,16 +3043,39 @@ async function openAdmin() {
           packKey: db.defaults?.packKey ?? "",
           rollTable: db.defaults?.rollTable ?? "",
           faces:[],
+          vendorActors:[],
+          vendorTokens:[],
           items:[],
           tileUuids:[],
           dynamic:defaultDynamicSettings(),
           purse: 0,
+          customerDiscounts:[],
           buyback: {
             Ammo:{on:false,pct:50}, Armor:{on:false,pct:50}, Clothing:{on:false,pct:50},
             Cyberdeck:{on:false,pct:40}, Cyberware:{on:false,pct:40}, Drug:{on:false,pct:30},
             Gear:{on:false,pct:50},   Upgrade:{on:false,pct:50}, Vehicle:{on:false,pct:30}, Weapon:{on:false,pct:50}
           }
         };
+        data.customerDiscounts = normalizeCustomerDiscounts(data.customerDiscounts);
+        const renderCustomerDiscounts = () => data.customerDiscounts.length
+          ? data.customerDiscounts.map((entry,i)=>`
+              <div class="customer-discount-row" data-customer-discount-i="${i}">
+                <img class="face" src="${esc(entry.img || 'icons/svg/mystery-man.svg')}">
+                <div class="customer-name" title="${esc(entry.name)}">${esc(entry.name)}</div>
+                <label class="discount-control">
+                  <input type="number" class="customer-discount-pct" min="0" max="100" step="1" value="${Math.max(0, Math.min(100, Number(entry.pct|0) || 0))}"> % off
+                </label>
+                <span class="x" data-customer-discount-rem title="Remove preferred-customer discount">✕</span>
+              </div>`).join("")
+          : `<div class="muted">No preferred customers configured for this Bodega.</div>`;
+        data.vendorActors = normalizeVendorActors(data.vendorActors);
+        data.vendorTokens = normalizeVendorTokens(data.vendorTokens);
+        const renderVendorActors = () => data.vendorActors.length
+          ? data.vendorActors.map((entry,i)=>`<span class="face-chip vendor-binding-chip" data-vendor-actor-i="${i}"><img class="face" src="${esc(entry.img || 'icons/svg/mystery-man.svg')}"><span class="vendor-label" title="${esc(entry.name)}">${esc(entry.name)}</span><span class="stock-badge binding-kind">Actor</span><span class="x" data-vendor-actor-rem title="Remove Actor-wide vendor binding">✕</span></span>`).join("")
+          : `<span class="muted">No Actor-wide vendor binding.</span>`;
+        const renderVendorTokens = () => data.vendorTokens.length
+          ? data.vendorTokens.map((entry,i)=>`<span class="face-chip vendor-binding-chip" data-vendor-token-i="${i}"><img class="face" src="${esc(entry.img || 'icons/svg/mystery-man.svg')}"><span class="vendor-label" title="${esc(entry.name)}${entry.sceneName ? ` — ${esc(entry.sceneName)}` : ''}">${esc(entry.name)}${entry.sceneName ? ` <span class="muted">· ${esc(entry.sceneName)}</span>` : ''}</span><span class="stock-badge dynamic binding-kind">Token</span><span class="x" data-vendor-token-rem title="Remove specific Token vendor binding">✕</span></span>`).join("")
+          : `<span class="muted">No specific Token override.</span>`;
 
         db.shops[data.id] = data; await saveAll(db); // ensure exists immediately
         refresh();
@@ -2365,6 +3125,22 @@ async function openAdmin() {
               <div class="drop" data-drop-face>Drop Token/Actor here</div>
             </fieldset>
 
+            <!-- Vendor Token / Actor HUD Binding -->
+            <fieldset style="border:1px solid var(--accent);border-radius:8px;padding:8px;">
+              <legend style="padding:0 6px">Vendor Token / Actor HUD Binding</legend>
+              <div class="muted">Adds an <b>Open Bodega</b> storefront control to the Foundry Token HUD when this vendor Token is right-clicked. Specific Token bindings take priority over Actor-wide bindings.</div>
+              <div style="margin-top:8px"><b>Actor-wide Vendor</b> <span class="muted">— every Token using this Actor opens this Bodega.</span></div>
+              <div class="vendor-binding-list" data-vendor-actors>${renderVendorActors()}</div>
+              <div class="drop" data-drop-vendor-actor>Drop NPC Actor or Token here for Actor-wide binding</div>
+              <div style="margin-top:10px"><b>Specific Token Override</b> <span class="muted">— only this exact Token on this Scene opens this Bodega.</span></div>
+              <div class="vendor-binding-list" data-vendor-tokens>${renderVendorTokens()}</div>
+              <div class="drop" data-drop-vendor-token>Drop a specific NPC Token here</div>
+              <div class="row" style="margin-top:6px;align-items:center">
+                <button type="button" class="btn" data-bind-selected-vendor-token><i class="fas fa-crosshairs"></i> Bind Selected Token</button>
+                <span class="muted">If Foundry reports a Canvas Token drag as its Actor, select exactly one placed NPC Token and use this button.</span>
+              </div>
+            </fieldset>
+
             <!-- Buyback & Purse -->
             <fieldset style="border:1px solid var(--accent);border-radius:8px;padding:8px;">
               <legend style="padding:0 6px">Buyback / Vendor Cash</legend>
@@ -2374,6 +3150,13 @@ async function openAdmin() {
                   Vendor Purse (eb)
                   <input type="number" class="v-purse" data-shop="${esc(data.id)}" min="0" step="1" value="${data.purse|0}" style="width:120px">
                 </label>
+              </div>
+
+              <div style="margin:8px 0 10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.08)">
+                <div><b>Preferred Customer Discounts</b></div>
+                <div class="muted" style="margin-top:2px">Reward specific Chooms with a discount at this Bodega regardless of Role. Drop a PC Actor/Token below and set their percentage. This never grants access to Fixer-only stock; if a Fixer qualifies for both discounts, the better price wins instead of stacking.</div>
+                <div class="customer-discount-list" data-customer-discounts>${renderCustomerDiscounts()}</div>
+                <div class="drop" data-customer-discount-drop>Drop PC Actor/Token here to grant a Bodega discount</div>
               </div>
 
               <div class="bb-grid">
@@ -2397,13 +3180,13 @@ async function openAdmin() {
 
             <!-- Ledger -->
             <fieldset style="border:1px solid var(--accent);border-radius:8px;padding:8px;">
-              <legend style="padding:0 6px">Ledger (Container/NPC)</legend>
+              <legend style="padding:0 6px">Ledger (Container/Player)</legend>
               <div class="row" data-ledger-row>
                 ${ data.ledgerUuid 
                   ? `<span class="face-chip" data-ledger-chip><span class="muted">Linked:</span> <b>${esc((await fromUuid(data.ledgerUuid))?.name || data.ledgerUuid)}</b> <span class="x" title="Clear">✕</span></span>`
                   : `<span class="muted">Drop a Container here to use its Wealth as the vendor purse.</span>`}
               </div>
-              <div class="drop" data-drop-ledger>Drop Container/NPC here</div>
+              <div class="drop" data-drop-ledger>Drop Container/Player here</div>
             </fieldset>
 
             <!-- Dynamic Inventory -->
@@ -2538,12 +3321,19 @@ async function openAdmin() {
             const $drop     = rootEd.querySelector("[data-drop]");
             const $dropFace = rootEd.querySelector("[data-drop-face]");
             const $faces    = rootEd.querySelector("[data-faces]");
+            const $vendorActors = rootEd.querySelector("[data-vendor-actors]");
+            const $vendorTokens = rootEd.querySelector("[data-vendor-tokens]");
+            const $dropVendorActor = rootEd.querySelector("[data-drop-vendor-actor]");
+            const $dropVendorToken = rootEd.querySelector("[data-drop-vendor-token]");
+            const $bindSelectedVendorToken = rootEd.querySelector("[data-bind-selected-vendor-token]");
             const $datalist = rootEd.querySelector("#bodega-suggest");
             const $quick    = rootEd.querySelector(".v-quick");
             const $packIn   = rootEd.querySelector(".v-pack");
             const $tableIn  = rootEd.querySelector(".v-table");
             const $dropLedger = rootEd.querySelector("[data-drop-ledger]");
             const $ledgerRow  = rootEd.querySelector("[data-ledger-row]");
+            const $customerDiscountList = rootEd.querySelector("[data-customer-discounts]");
+            const $customerDiscountDrop = rootEd.querySelector("[data-customer-discount-drop]");
             const $dynPool = rootEd.querySelector("[data-dyn-pool]");
             const $dynDrop = rootEd.querySelector("[data-dyn-pool-drop]");
             const $dynSearch = rootEd.querySelector(".dyn-pool-search");
@@ -2602,7 +3392,7 @@ async function openAdmin() {
               e.preventDefault(); e.currentTarget.classList.remove("drag");
               const raw = e.dataTransfer.getData("text/plain"); if (!raw) return;
               let d; try{ d=JSON.parse(raw); }catch{}
-              if (!d || (d.type!=="Actor" && d.type!=="Token")) return ui.notifications.warn("Drop a Container/NPC Actor.");
+              if (!d || (d.type!=="Actor" && d.type!=="Token")) return ui.notifications.warn("Drop a Container/Player Actor.");
               let a=null;
               if (d.type==="Token"){ const tok = await fromUuid(d.uuid || `Scene.${sceneId}.Token.${d.id}`); a = tok?.actor; }
               else { a = await fromUuid(d.uuid || `Actor.${d.id}`); }
@@ -2622,7 +3412,147 @@ async function openAdmin() {
               if (!ev.target.closest(".x")) return;
               data.ledgerUuid = null;
               await commit();
-              $ledgerRow.innerHTML = `<span class="muted">Drop a Container/NPC here to use its Wealth as the vendor purse.</span>`;
+              $ledgerRow.innerHTML = `<span class="muted">Drop a Container/Player here to use its Wealth as the vendor purse.</span>`;
+            });
+
+            function refreshVendorBindings(){
+              data.vendorActors = normalizeVendorActors(data.vendorActors);
+              data.vendorTokens = normalizeVendorTokens(data.vendorTokens);
+              if ($vendorActors) $vendorActors.innerHTML = renderVendorActors();
+              if ($vendorTokens) $vendorTokens.innerHTML = renderVendorTokens();
+            }
+            async function resolveDroppedVendorActor(d){
+              if (!d || (d.type !== "Actor" && d.type !== "Token")) return null;
+              if (d.type === "Actor") return await fromUuid(d.uuid || `Actor.${d.id}`);
+              const tok = await fromUuid(d.uuid || `Scene.${sceneId}.Token.${d.id}`);
+              if (!tok) return null;
+              return game.actors?.get(tok.actorId) || tok.actor || null;
+            }
+            async function onDropVendorActor(e){
+              e.preventDefault(); e.currentTarget.classList.remove("drag");
+              const raw=e.dataTransfer.getData("text/plain"); if(!raw) return;
+              let d=null; try{ d=JSON.parse(raw); }catch{}
+              const actor = await resolveDroppedVendorActor(d);
+              if (!actor) return ui.notifications.warn("Drop an NPC Actor or Token for Actor-wide Bodega binding.");
+              const actorId = String(actor.id || ""); const actorUuid = String(actor.uuid || "");
+              // One Actor-wide storefront at a time. Exact Token overrides remain untouched.
+              for (const [otherId, otherShop] of Object.entries(db.shops || {})){
+                if (otherId === data.id) continue;
+                otherShop.vendorActors = normalizeVendorActors(otherShop.vendorActors).filter(entry =>
+                  !((actorId && entry.actorId === actorId) || (actorUuid && entry.actorUuid === actorUuid))
+                );
+              }
+              data.vendorActors = normalizeVendorActors(data.vendorActors);
+              const hit = data.vendorActors.find(entry => (actorId && entry.actorId === actorId) || (actorUuid && entry.actorUuid === actorUuid));
+              const record = {actorId, actorUuid, name:actor.name, img:actor.img || actor.prototypeToken?.texture?.src || "icons/svg/mystery-man.svg"};
+              if (hit) Object.assign(hit, record); else data.vendorActors.push(record);
+              await commit(); refreshVendorBindings(); autosizeDialog(app2, bodyId);
+              ui.notifications.info(`${actor.name} now opens ${data.name} from its Token HUD.`);
+            }
+            async function bindSpecificVendorToken(tokenLike){
+              const tok = vendorTokenDocument(tokenLike);
+              if (!tok?.uuid) return ui.notifications.warn("Could not resolve that placed Token.");
+              const tokenUuid=String(tok.uuid); const tokenId=String(tok.id || tok._id || ""); const boundSceneId=String(tok.parent?.id || sceneId || "");
+              if (!boundSceneId || !tokenId) return ui.notifications.warn("Bodega needs a placed Scene Token for a specific Token override.");
+              // One exact Token storefront at a time. Actor-wide binding can coexist as a fallback.
+              for (const [otherId, otherShop] of Object.entries(db.shops || {})){
+                if (otherId === data.id) continue;
+                otherShop.vendorTokens = normalizeVendorTokens(otherShop.vendorTokens).filter(entry =>
+                  !((entry.tokenUuid && entry.tokenUuid === tokenUuid) || (entry.sceneId === boundSceneId && entry.tokenId === tokenId))
+                );
+              }
+              data.vendorTokens = normalizeVendorTokens(data.vendorTokens);
+              const hit = data.vendorTokens.find(entry => (entry.tokenUuid && entry.tokenUuid === tokenUuid) || (entry.sceneId === boundSceneId && entry.tokenId === tokenId));
+              const actor = game.actors?.get(tok.actorId) || tok.actor || null;
+              const record = {
+                tokenUuid, tokenId, sceneId:boundSceneId,
+                actorId:String(tok.actorId || actor?.id || ""), actorUuid:String(actor?.uuid || ""),
+                name:tok.name || actor?.name || "Vendor Token", sceneName:tok.parent?.name || canvas?.scene?.name || "",
+                img:tok.texture?.src || actor?.img || "icons/svg/mystery-man.svg"
+              };
+              if (hit) Object.assign(hit, record); else data.vendorTokens.push(record);
+              await commit(); refreshVendorBindings(); autosizeDialog(app2, bodyId);
+              ui.notifications.info(`${record.name} now opens ${data.name} from this specific Token.`);
+              return record;
+            }
+            async function onDropVendorToken(e){
+              e.preventDefault(); e.currentTarget.classList.remove("drag");
+              const d = bodegaDragEventData(e);
+              const tok = await resolveSpecificVendorTokenDrop(d);
+              if (!tok) return ui.notifications.warn("Could not resolve an exact placed Token from that drop. Select exactly one NPC Token on the canvas and click Bind Selected Token.");
+              return bindSpecificVendorToken(tok);
+            }
+            async function bindSelectedVendorToken(){
+              const selected = Array.from(canvas?.tokens?.controlled || []);
+              if (selected.length !== 1) return ui.notifications.warn("Select exactly one placed NPC Token on the current Scene, then click Bind Selected Token.");
+              return bindSpecificVendorToken(selected[0]);
+            }
+            for (const drop of [$dropVendorActor,$dropVendorToken]){
+              drop?.addEventListener("dragover", dragOver2);
+              drop?.addEventListener("dragleave", dragLeave2);
+            }
+            $dropVendorActor?.addEventListener("drop", onDropVendorActor);
+            $dropVendorToken?.addEventListener("drop", onDropVendorToken);
+            $bindSelectedVendorToken?.addEventListener("click", bindSelectedVendorToken);
+            $vendorActors?.addEventListener("click", async ev => {
+              const row=ev.target.closest("[data-vendor-actor-i]");
+              if (!row || !ev.target.closest("[data-vendor-actor-rem]")) return;
+              const idx=Number(row.getAttribute("data-vendor-actor-i")); if(!Number.isInteger(idx)) return;
+              data.vendorActors.splice(idx,1); await commit(); refreshVendorBindings(); autosizeDialog(app2, bodyId);
+            });
+            $vendorTokens?.addEventListener("click", async ev => {
+              const row=ev.target.closest("[data-vendor-token-i]");
+              if (!row || !ev.target.closest("[data-vendor-token-rem]")) return;
+              const idx=Number(row.getAttribute("data-vendor-token-i")); if(!Number.isInteger(idx)) return;
+              data.vendorTokens.splice(idx,1); await commit(); refreshVendorBindings(); autosizeDialog(app2, bodyId);
+            });
+
+            function refreshCustomerDiscounts(){
+              data.customerDiscounts = normalizeCustomerDiscounts(data.customerDiscounts);
+              if ($customerDiscountList) $customerDiscountList.innerHTML = renderCustomerDiscounts();
+            }
+            async function onDropCustomerDiscount(e){
+              e.preventDefault(); e.currentTarget.classList.remove("drag");
+              const raw = e.dataTransfer.getData("text/plain"); if (!raw) return;
+              let d=null; try{ d=JSON.parse(raw); }catch{}
+              if (!d || (d.type!=="Actor" && d.type!=="Token")) return ui.notifications.warn("Drop a PC Actor or Token to grant a Bodega discount.");
+              let actor=null;
+              if (d.type === "Token"){
+                const tok = await fromUuid(d.uuid || `Scene.${sceneId}.Token.${d.id}`);
+                actor = tok?.actor || null;
+              } else actor = await fromUuid(d.uuid || `Actor.${d.id}`);
+              if (!actor) return ui.notifications.warn("Could not resolve that Actor.");
+              data.customerDiscounts = normalizeCustomerDiscounts(data.customerDiscounts);
+              const hit = data.customerDiscounts.find(entry =>
+                (entry.actorUuid && entry.actorUuid === actor.uuid) ||
+                (entry.actorId && entry.actorId === actor.id)
+              );
+              if (hit){
+                hit.actorUuid = actor.uuid; hit.actorId = actor.id; hit.name = actor.name; hit.img = actor.img || hit.img;
+                ui.notifications.info(`${actor.name} already has a preferred-customer discount here.`);
+              } else {
+                data.customerDiscounts.push({actorUuid:actor.uuid, actorId:actor.id, name:actor.name, img:actor.img || "icons/svg/mystery-man.svg", pct:10});
+              }
+              await commit(); refreshCustomerDiscounts(); autosizeDialog(app2, bodyId);
+            }
+            $customerDiscountDrop?.addEventListener("dragover", dragOver2);
+            $customerDiscountDrop?.addEventListener("dragleave", dragLeave2);
+            $customerDiscountDrop?.addEventListener("drop", onDropCustomerDiscount);
+            $customerDiscountList?.addEventListener("input", async (ev)=>{
+              if (!ev.target.classList.contains("customer-discount-pct")) return;
+              const row = ev.target.closest("[data-customer-discount-i]");
+              const idx = Number(row?.getAttribute("data-customer-discount-i"));
+              if (!Number.isInteger(idx) || !data.customerDiscounts[idx]) return;
+              data.customerDiscounts[idx].pct = Math.max(0, Math.min(100, Number(ev.target.value|0)));
+              await commit();
+            });
+            $customerDiscountList?.addEventListener("click", async (ev)=>{
+              if (!ev.target.closest("[data-customer-discount-rem]")) return;
+              const row = ev.target.closest("[data-customer-discount-i]");
+              const idx = Number(row?.getAttribute("data-customer-discount-i"));
+              if (!Number.isInteger(idx) || !data.customerDiscounts[idx]) return;
+              data.customerDiscounts.splice(idx,1);
+              await commit(); refreshCustomerDiscounts(); autosizeDialog(app2, bodyId);
             });
 
             async function commit(){ db.shops[data.id]=data; await saveAll(db); refresh(); }
@@ -2797,10 +3727,10 @@ async function openAdmin() {
                 await commit();
                 openShop(data.id);
               }
-              if (ev.target.closest(".face-chip .x")){
-                const chip = ev.target.closest(".face-chip");
+              if (ev.target.closest(".face-chip[data-i] .x")){
+                const chip = ev.target.closest(".face-chip[data-i]");
                 const idx = Number(chip?.getAttribute("data-i"));
-                if (!Number.isNaN(idx)) { data.faces.splice(idx,1); await commit(); renderFaces(); }
+                if (Number.isInteger(idx)) { data.faces.splice(idx,1); await commit(); renderFaces(); }
               }
             });
 
@@ -2903,7 +3833,7 @@ function guessNameForImage(img){
 }
 
 // -------------------- Player shop --------------------
-async function openShop(shopId){
+async function openShop(shopId, options={}){
   const bodyId = makeUiId("shop");
   const db = await loadAll();
   const shop = db.shops?.[shopId];
@@ -2912,12 +3842,13 @@ async function openShop(shopId){
     return ui.notifications.warn("This Bodega is not available on this scene.");
 
   const items = shop.items||[];
-  const buyer = canvas.tokens.controlled[0]?.actor ?? game.user.character;
-  if(!buyer) return ui.notifications.warn("Select a token or set a Player Character.");
+  const buyer = options?.buyer || vendorBuyerFromContext(options?.vendorToken) || canvas.tokens.controlled[0]?.actor || game.user.character;
+  if(!buyer) return ui.notifications.warn("Select a customer token or set a Player Character before opening this Bodega.");
 
   const rank = getFixerRank(buyer);
   const discCfg = db.defaults?.fixerDiscounts ?? defaultDB().defaults.fixerDiscounts;
   const isFixer = rank>0;
+  const preferredCustomer = getPreferredCustomerDiscount(shop, buyer);
 
   const ledger = await resolveLedger(shop);
   const ledgerPurse = ledger ? Number(ledger.system?.wealth?.value|0) : null;
@@ -2970,6 +3901,9 @@ async function openShop(shopId){
   const fixerTag = isFixer
     ? `<div class="fixer-tag"><b>Fixer:</b> You qualify to view Fixer-only items.</div>`
     : "";
+  const preferredTag = preferredCustomer && preferredCustomer.pct > 0
+    ? `<div class="fixer-tag"><b>Preferred Customer:</b> ${Math.max(0, Math.min(100, Number(preferredCustomer.pct|0)))}% off purchases at this Bodega.</div>`
+    : "";
 
 // Faces (same as 2.0.3)
 const facesHTML = (shop.faces?.length)
@@ -2986,13 +3920,14 @@ const facesHTML = (shop.faces?.length)
 // Items list (player view layout)
 const itemsListHTML = visible.length ? visible.map((it,i)=>{
   const soldOut = !it.infinite && (Number(it.qty|0) <= 0);
-  const finalPrice = priceWithFixerBuyDiscount(it.price|0, isFixer, rank, discCfg, !!it.fixerOnly);
-  const hasDiscount = !!it.fixerOnly && finalPrice < (it.price|0) && isFixer;
+  const pricing = bodegaBuyPricing(it.price|0, shop, buyer, isFixer, rank, discCfg, !!it.fixerOnly);
+  const finalPrice = pricing.price;
+  const hasDiscount = finalPrice < (it.price|0);
 
   const priceLine =
     `<span class="muted price-line">` +
       (hasDiscount
-        ? `<del>${it.price|0} <span class="eb">eb</span></del> <b>${finalPrice}</b> <span class="eb">eb</span>`
+        ? `<del>${it.price|0} <span class="eb">eb</span></del> <b>${finalPrice}</b> <span class="eb">eb</span> <i>(${pricing.appliedPct}% off)</i>`
         : `<b>${finalPrice}</b> <span class="eb">eb</span>`) +
       ` — ${it.infinite ? '<span class="stock-live">∞ stock</span>' : `<span class="stock-live">${it.qty|0} left</span>`}` +
       (Number(it.packageSize || 1) > 1 ? ` — <i>${Number(it.packageSize|0)} units / purchase</i>` : '') +
@@ -3049,9 +3984,9 @@ const sellBlockHTML = sellables.length ? `
           </div>
           <div class="buy-controls sell-controls">
   <label class="qty-label">QTY
-    <input class="qty-sell" type="number" min="1" max="${s.qtyAvail}" value="${Math.min(1, s.qtyAvail)}" ${s.packageVerified ? '' : 'disabled'}>
+    <input class="qty-sell" type="number" min="1" max="${s.qtyAvail}" value="${Math.min(1, s.qtyAvail)}">
   </label>
-  <button class="btn sell" data-sell ${s.packageVerified ? '' : 'disabled title="Original market package size cannot be verified automatically."'}>${s.packageVerified ? 'Sell' : 'GM Review'}</button>
+  <button class="btn sell" data-sell ${s.packageVerified ? '' : 'title="Ask the active GM to verify this item’s original market package size and approve the buyback."'}>${s.packageVerified ? 'Sell' : 'GM Review'}</button>
 </div>
 
         </div>
@@ -3073,6 +4008,7 @@ const content = `
       </div>
     </div>
     ${fixerTag}
+    ${preferredTag}
     <div class="list" data-list>
       ${itemsListHTML}
     </div>
@@ -3195,8 +4131,71 @@ const content = `
           return;
         }
         if (!entry.packageVerified) {
-          ui.notifications.warn("Bodega cannot verify this stacked item's original market package size. GM review required; handle this buyback manually.");
-          row.dataset.busy = "";
+          const freshReview = buyer.items.get(entry.it.id)
+            || buyer.items.find(i => i.name === entry.it.name && getItemMarketValue(i) === entry.baseVal);
+          if (!freshReview) {
+            ui.notifications.warn("That item changed. Re-open Bodega and try again.");
+            row.dataset.busy = "";
+            row.querySelector(".sell")?.removeAttribute("disabled");
+            return;
+          }
+
+          const qtyInput = Number(row.querySelector(".qty-sell")?.value ?? 1) | 0;
+          const qty = Math.max(1, Math.min(readStackQty(freshReview), qtyInput || 1));
+          const payload = {
+            nonce:bodegaNonce(),
+            userId:game.user?.id || null,
+            shopId:shop.id,
+            sellerUuid:buyer.uuid,
+            itemId:freshReview.id,
+            itemName:freshReview.name,
+            baseVal:Math.max(0, getItemMarketValue(freshReview)|0),
+            qty
+          };
+
+          const reviewButton = row.querySelector(".sell");
+          const reviewQty = row.querySelector(".qty-sell");
+          if (reviewButton) reviewButton.innerHTML = '<i class="fas fa-user-check"></i> Awaiting GM';
+          if (reviewQty) reviewQty.disabled = true;
+
+          const finishReview = (result) => {
+            if (result?.ok) {
+              row.remove();
+              ui.notifications.info(`GM-approved buyback completed for ${freshReview.name}.`);
+              return;
+            }
+            row.dataset.busy = "";
+            if (reviewButton) {
+              reviewButton.disabled = false;
+              reviewButton.innerHTML = 'GM Review';
+            }
+            if (reviewQty) reviewQty.disabled = false;
+            if (result?.message) ui.notifications.warn(result.message);
+          };
+
+          if (game.user?.isGM) {
+            await openGMReviewBuyback(payload, finishReview);
+            return;
+          }
+
+          if (!game.users?.activeGM) {
+            finishReview({ok:false, message:"No active GM is available to review this buyback."});
+            return;
+          }
+
+          let acked = false;
+          const onReviewAck = (message) => {
+            if (message?.nonce !== payload.nonce) return;
+            if (message.userId && message.userId !== game.user?.id) return;
+            if (message.op !== "buyback-done" && message.op !== "buyback-failed") return;
+            acked = true;
+            game.socket.off(SOCKET, onReviewAck);
+            finishReview({ok:message.op === "buyback-done", message:message.message});
+          };
+          game.socket.on(SOCKET, onReviewAck);
+          game.socket.emit(SOCKET, {op:"gm-buyback-review", payload});
+          ui.notifications.info("Buyback sent to the GM for package-size review.");
+
           return;
         }
 
@@ -3364,6 +4363,11 @@ function exposeAPI() {
     openOptions,
     openShop,
     openBoundTile,
+    openVendorToken:openShopFromVendorToken,
+    resolveVendorToken:resolveBodegaForVendorToken,
+    resolveVendorTokenSync:resolveBodegaForVendorTokenSync,
+    rebindVendorInteraction:()=>bindPlayerVendorCanvasInteraction(),
+    playerVendorInteractionMode,
     openTile:(tile) => { const id = bodegaIdFromTile(tile); return id ? openShop(id) : ui.notifications.warn("This Tile is not bound to a Bodega."); },
     bindSelectedTiles:bindShopToTiles,
     unbindSelectedTiles,
@@ -3415,11 +4419,37 @@ Hooks.once("ready", () => {
   exposeAPI();
   bindBodegaBridge();
   bindCalendarHooks();
+  bindPlayerVendorCanvasInteraction();
   console.log(`Bodega | Ready v${MODULE_VERSION}. Existing bodega.db shop data is available.`);
 });
 
 Hooks.on("canvasReady", (canvasInstance) => {
   sceneId = canvasInstance?.scene?.id ?? canvas?.scene?.id ?? null;
+  bindPlayerVendorCanvasInteraction();
+});
+
+Hooks.on("renderTokenHUD", async (hud, html) => {
+  try{
+    const token = vendorTokenDocument(hud?.object || hud?.document || hud);
+    if (!token) return;
+    const match = await resolveBodegaForVendorToken(token);
+    if (!match) return;
+    const root = html?.[0] || html;
+    if (!root?.querySelector || root.querySelector(".bodega-token-hud")) return;
+    ensureVendorHudStyle();
+    const button = document.createElement("div");
+    button.className = "control-icon bodega-token-hud";
+    button.title = `Open Bodega — ${match.shop.name}`;
+    button.dataset.tooltip = `Open Bodega — ${match.shop.name}`;
+    button.innerHTML = '<i class="fas fa-store" aria-hidden="true"></i>';
+    button.addEventListener("click", async ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      await openShopFromVendorToken(token);
+    });
+    const right = root.querySelector(".col.right") || root.querySelector(".right");
+    const left = root.querySelector(".col.left") || root.querySelector(".left");
+    (right || left || root).appendChild(button);
+  }catch(err){ console.warn("Bodega | Token HUD binding render failed", err); }
 });
 
 Hooks.on("getSceneControlButtons", (controls) => {
