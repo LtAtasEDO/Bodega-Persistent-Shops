@@ -3,6 +3,8 @@ Persistent Cyberpunk RED bodegas with protected vendor ledgers and serialized pu
 
 This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.3.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
 
+[Bodega™ Persistent Shops Wiki](https://github.com/LtAtasEDO/Bodega-Persistent-Shops/wiki)
+
 ## Install
 
 1. Shut down the Foundry world.
