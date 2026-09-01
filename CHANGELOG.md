@@ -1,4 +1,8 @@
 # Bodega™ Changelog
+## 2.3.14
+- Replaced `assets/bodega.webp` with the new storefront + shopping-cart hybrid icon to better match the Cyberpunk RED core compendium visual language while keeping the established Bodega asset path intact.
+- Updated README attribution and asset provenance notes for the packaged Bodega icon.
+- The packaged icon is a modified derivative based on the SVG Repo **Store** and **Shopping Cart** CC0 vectors, remixed for Bodega and exported as the module's bundled WEBP asset.
 
 ## 2.3.13
 - Fixed **Specific Token Override** binding after live Foundry v12 validation showed Canvas Token drags could arrive at the Edit Bodega HTML drop zone using Actor-shaped/non-`Token` drag payloads.
