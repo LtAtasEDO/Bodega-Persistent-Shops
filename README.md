@@ -1,4 +1,4 @@
-# Bodega-Persistent-Shops
+# Bodega-Persistent-Shops — Foundry VTT 12
 Persistent Cyberpunk RED bodegas with protected vendor ledgers and serialized purchases and live stock updates with GM-review protection of unverified stock. Fixer pricing and automatic Fixer gating with static+dynamic inventory with RollTable/pack sources, Simple Calendar traffic/restocking, with direct Monk's Active Tile binding.
 
 This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.3.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
@@ -24,7 +24,7 @@ game.bodega.openAdmin();
 
 ## Open a shop
 
-For a macro, Monk's Active Tile/Trigger script:
+For a macro, Monk's Active Tile/Trigger script, or another module:
 
 ```js
 return game.bodega.openShop("your-shop-id");
@@ -47,6 +47,18 @@ return game.bodega.launch({ id: "your-shop-id" });
 - `game.bodega.launch(input)` — compatibility launcher.
 - `game.bodega.loadAll()` / `saveAll(db)` — database access.
 - `game.bodega.bind()` — manually ensure the socket bridge is bound.
+
+
+## Asset credit (bodega.webp)
+
+As of **v2.3.14**, the packaged `assets/bodega.webp` icon uses a modified **storefront + shopping-cart hybrid** created for Bodega to better match the visual language used by the Cyberpunk RED core compendium and related local modules.
+
+Source vectors used for the derivative icon:
+
+- **Store** — SVG Repo, **CC0 License**
+- **Shopping Cart** — SVG Repo, **CC0 License**
+
+The final `bodega.webp` icon bundled in this module is a remixed/edited derivative prepared for Bodega and may be recolored or further refined as needed for future releases.
 
 ## What changed from the macros
 
