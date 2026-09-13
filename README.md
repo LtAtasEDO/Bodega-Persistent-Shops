@@ -1,4 +1,5 @@
-# Bodega-Persistent-Shops — Foundry VTT 12
+# Bodega-Persistent-Shops for use with Cyberpunk RED
+
 Persistent Cyberpunk RED bodegas with protected vendor ledgers and serialized purchases and live stock updates with GM-review protection of unverified stock. Fixer pricing and automatic Fixer gating with static+dynamic inventory with RollTable/pack sources, Simple Calendar traffic/restocking, with direct Monk's Active Tile binding.
 
 This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.3.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
@@ -228,3 +229,13 @@ As of v2.3.9, **GM Review is actionable** rather than a dead-end safety label. v
 An approved review uses the normal serialized GM-authoritative buyback transaction. By default the reviewed package definition is stamped onto any remaining Actor stack, so later partial sales can be valued automatically. Cancelling or closing the GM review moves no inventory and no eurobucks; an open review stays pending until the GM makes a decision. Players cannot supply or spoof the trusted package override themselves; only the active GM review dialog can create it.
 
 Atomic Items with no stack field remain ordinary single items. CPR ammo keeps the established conservative fallback rules when source metadata is missing: grenade/rocket 1, battery 8 (or an explicit description count), other standard ammo 10.
+
+## Legal / Homebrew Content Policy
+
+This is unofficial homebrew content for use with Cyberpunk RED.
+
+This project is provided free of charge under the R. Talsorian Games Homebrew Content Policy.
+
+Bodega Persistent Shops for use with Cyberpunk RED is unofficial content provided under the Homebrew Content Policy of R. Talsorian Games and is not approved or endorsed by RTG. This content references materials that are the property of R. Talsorian Games and its licensees.
+
+Cyberpunk RED and related properties are the property of R. Talsorian Games and their respective licensees.
