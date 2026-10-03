@@ -1,5 +1,5 @@
 /**
- * Bodega™ Persistent Shops — Foundry VTT Module v2.3.13
+ * Bodega™ Persistent Shops — Foundry VTT Module v2.4.0
  *
  * Ported from the Bodega™ v2.0.3 / v2.0.3c macros for Foundry VTT 12.
  * Keeps the existing world setting namespace (bodega.db) so configured shops migrate in place.
@@ -9,7 +9,7 @@
 "use strict";
 
 const MODULE_ID = "bodega";
-const MODULE_VERSION = "2.3.13";
+const MODULE_VERSION = "2.4.0";
 const SOCKET = `module.${MODULE_ID}`;
 let isGM = false;
 let sceneId = null;
@@ -38,11 +38,23 @@ function bindBodegaBridge() {
       return;
     }
     if (msg.op === "buyback-done" || msg.op === "buyback-failed" || msg.op === "purchase-done" || msg.op === "purchase-failed") return;
+    if (msg.op === "preview-result") return;
 
     // Only the active GM may persist shop, stock, ledger, purchase, or buyback changes.
     // This prevents duplicate transactions when more than one GM account is connected.
     if (!game.user?.isGM) return;
     if (game.users?.activeGM?.id && game.users.activeGM.id !== game.user.id) return;
+
+    if (msg.op === "item-preview") {
+      try {
+        const preview = await resolveShopPreview(msg.payload);
+        game.socket.emit(SOCKET, {op:"preview-result", nonce:msg.payload?.nonce, userId:msg.payload?.userId, preview});
+      } catch (error) {
+        console.warn("Bodega | Item preview unavailable", error);
+        game.socket.emit(SOCKET, {op:"preview-result", nonce:msg.payload?.nonce, userId:msg.payload?.userId, message:error.message || "Item preview unavailable."});
+      }
+      return;
+    }
 
     if (msg.op === "stock") {
       const db = await loadAll();
@@ -554,20 +566,21 @@ async function openGMReviewBuyback(payload, localResultCallback=null){
         const validSize = Number.isFinite(sizeRaw) && sizeRaw >= 1 && sizeRaw === size;
         const total = validSize ? proportionalBuybackTotal(price, finalPct, qty, size) : 0;
         const cashOkay = total <= vendorCash;
-        return {price, size, validSize, total, cashOkay};
+        return {price, size, validSize, total, cashOkay, limitMessage:buybackLimitMessage(shop, price)};
       };
 
       const refresh = () => {
-        const {price, size, validSize, total, cashOkay} = reviewState();
+        const {price, size, validSize, total, cashOkay, limitMessage} = reviewState();
         sizeInput?.classList.toggle("review-invalid", !validSize && !!String(sizeInput?.value || "").trim());
         if (preview) {
           if (!validSize) preview.innerHTML = '<b>Required:</b> enter a whole-number market package size of <b>1 or more</b>. Example: 1 for a single item, 10 for a ten-round ammo box, or 20 for a pack of cigarettes.';
+          else if (limitMessage) preview.innerHTML = esc(limitMessage);
           else if (total <= 0) preview.innerHTML = `Reviewed package: <b>${size}</b> unit${size===1?'':'s'} for <b>${price}</b> eb. This requested quantity produces <b>less than 1 eb</b> at ${finalPct}%.`;
           else if (!cashOkay) preview.innerHTML = `Offer would be <b>${total} eb</b>, but the vendor only has <b>${vendorCash} eb</b>.`;
           else preview.innerHTML = `Reviewed package: <b>${size}</b> unit${size===1?'':'s'} for <b>${price}</b> eb → seller receives <b>${total} eb</b> for ${qty} unit${qty===1?'':'s'} at ${finalPct}%.`;
         }
         if (approve) {
-          const ready = validSize && total > 0 && cashOkay;
+          const ready = validSize && total > 0 && cashOkay && !limitMessage;
           approve.setAttribute("aria-disabled", ready ? "false" : "true");
           approve.classList.toggle("review-ready", ready);
           approve.title = ready ? "Approve this reviewed buyback" : "Click to see what information is still required";
@@ -578,12 +591,13 @@ async function openGMReviewBuyback(payload, localResultCallback=null){
       refresh();
 
       approve?.addEventListener("click", async () => {
-        const {price:marketPrice, size:packageSize, validSize, total, cashOkay} = reviewState();
+        const {price:marketPrice, size:packageSize, validSize, total, cashOkay, limitMessage} = reviewState();
         if (!validSize) {
           sizeInput?.classList.add("review-invalid");
           sizeInput?.focus();
           return ui.notifications.warn("Enter the original Units per market package before approving this buyback.");
         }
+        if (limitMessage) return ui.notifications.warn(limitMessage);
         if (total <= 0) {
           priceInput?.focus();
           return ui.notifications.warn("That package definition produces a buyback worth less than 1 eb. Verify the market package price and size.");
@@ -768,6 +782,7 @@ async function gmProcessBuybackUnlocked(payload, reviewOverride=null){
   if (!bb.on) return fail("Vendor is not buying that category right now.");
 
   let packageInfo = await resolveMarketPackageInfo(item);
+  let reviewedMetadata = null;
   if (!packageInfo.verified && reviewOverride?.approved === true) {
     const reviewedSize = Math.max(1, Number(reviewOverride.packageSize || 0) | 0);
     const reviewedPrice = Math.max(0, Number(reviewOverride.marketPrice ?? getItemMarketValue(item)) | 0);
@@ -780,23 +795,17 @@ async function gmProcessBuybackUnlocked(payload, reviewOverride=null){
       provenance:"gm-review",
       requiresReview:false
     };
-    if (reviewOverride.remember !== false) {
-      try {
-        await item.update({[`flags.${MODULE_ID}.marketPackage`]: {
-          size:reviewedSize,
-          price:reviewedPrice,
-          sourceUuid:sourceUuidForMarketPackage(item) || null,
-          reviewedBy:game.user?.id || null,
-          reviewedAt:Date.now()
-        }});
-      } catch (error) {
-        console.warn("Bodega | Could not remember GM-reviewed market package metadata", error);
-      }
-    }
+    if (reviewOverride.remember !== false) reviewedMetadata = {
+      size:reviewedSize, price:reviewedPrice,
+      sourceUuid:sourceUuidForMarketPackage(item) || null,
+      reviewedBy:game.user?.id || null, reviewedAt:Date.now()
+    };
   }
   if (!packageInfo.verified) {
     return fail("Bodega cannot verify this stacked item's original market package size. GM review required.");
   }
+  const limitMessage = buybackLimitMessage(shop, packageInfo.marketPrice);
+  if (limitMessage) return fail(limitMessage);
   const baseValue = packageInfo.marketPrice;
   const packageSize = packageInfo.packageSize;
   const finalPct = applyFixerBonusToSell(bb.pct|0, rank, cfg);
@@ -810,6 +819,10 @@ async function gmProcessBuybackUnlocked(payload, reviewOverride=null){
   if (total <= 0) return fail(`No whole-eb offer yet. Sell more of that ${packageSize > 1 ? `package (${packageSize} units)` : 'item'} at once.`);
   if (total > vendorCash) return fail("Vendor is out of cash for that purchase.");
 
+  if (reviewedMetadata) {
+    try { await item.update({[`flags.${MODULE_ID}.marketPackage`]:reviewedMetadata}); }
+    catch (error) { console.warn("Bodega | Could not remember GM-reviewed market package metadata", error); }
+  }
   const raw = item.toObject();
   delete raw._id;
 
@@ -1509,6 +1522,9 @@ async function loadAll(){
     if (!v.dynamic.stockTable) v.dynamic.stockTable = v.rollTable || "";
     if (!v.dynamic.stockPack) v.dynamic.stockPack = v.packKey || "";
 
+    // Buyback limits are opt-in; legacy shops keep their existing acceptance rules.
+    v.buybackLimit = normalizeBuybackLimit(v.buybackLimit);
+
     // buyback
     if (!v.buyback || typeof v.buyback !== "object") v.buyback = {};
     for (const k of kinds){
@@ -1850,6 +1866,10 @@ function makePlayerCSS(accent = "#00FFF7", bodyId){
 #${bodyId} .item-left{ display:flex; align-items:center; gap:10px; flex:1 1 0; min-width:0; }
 #${bodyId} .thumb{ width:40px; height:40px; object-fit:cover; border-radius:6px; border:1px solid var(--line); background:#222; }
 #${bodyId} .name{ font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#${bodyId} .inspect-image{border:0;background:transparent;box-shadow:none;padding:0;margin:0;min-width:40px;width:40px;height:40px;flex:0 0 40px;cursor:pointer}
+#${bodyId} button.inspect-name{display:block;text-align:left;border:0;background:transparent;box-shadow:none;padding:0;margin:0;color:var(--text);width:auto;max-width:100%;line-height:1.4;cursor:pointer}
+#${bodyId} .inspect-name:hover{text-decoration:underline;color:var(--accent)}
+#${bodyId} [data-inspect]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 #${bodyId} .price-line{ font-size:12px; color:var(--muted); }
 #${bodyId} .price-line del{ opacity:.5; margin-right:6px; text-decoration-thickness:2px; }
 #${bodyId} .price-line b{ font-size:16px; font-weight:900; color:var(--yellow) !important; }
@@ -2755,6 +2775,132 @@ async function openOptions(){
 }
 
 // -------------------- helpers for buyback --------------------
+function normalizeBuybackLimit(value={}){
+  const maximum = Number(value?.maximum ?? 500);
+  return {enabled:!!value?.enabled, maximum:Number.isFinite(maximum) ? Math.max(0, Math.floor(maximum)) : 500};
+}
+function buybackLimitMessage(shop, marketPrice){
+  const limit = normalizeBuybackLimit(shop?.buybackLimit);
+  return limit.enabled && Number(marketPrice) > limit.maximum
+    ? `This vendor won't buy items valued above ${limit.maximum}eb.` : "";
+}
+
+// -------------------- read-only stock inspection --------------------
+// Rebuild descriptions from a small inert HTML allowlist. No Item sheets, permission
+// writes, roll enrichment, document embeds, macros, or original data/flags are exposed.
+function sanitizePreviewDescription(value){
+  const template = document.createElement("template");
+  template.innerHTML = String(value || "");
+  const allowed = new Set(["P","BR","DIV","SPAN","SECTION","B","STRONG","I","EM","U","S","DEL","SUB","SUP","UL","OL","LI","H1","H2","H3","H4","H5","H6","BLOCKQUOTE","PRE","CODE","HR","TABLE","THEAD","TBODY","TFOOT","TR","TH","TD"]);
+  const blocked = new Set(["SCRIPT","STYLE","IFRAME","OBJECT","EMBED","FORM","INPUT","BUTTON","SELECT","TEXTAREA","SVG","MATH","TEMPLATE"]);
+  const copy = (source, target) => {
+    for (const node of source.childNodes){
+      if (node.nodeType === 3){
+        // Keep human labels without sending linked UUIDs to the preview client.
+        const text = node.textContent.replace(/@(UUID|Item|Actor|JournalEntry|Macro|Embed)\[[^\]]*\](?:\{([^}]*)\})?/gi, (_, type, label) => label || "[Linked content]");
+        target.appendChild(document.createTextNode(text));
+      } else if (node.nodeType === 1){
+        if (blocked.has(node.tagName) || node.classList.contains("secret") || node.hidden) continue;
+        if (!allowed.has(node.tagName)){ copy(node, target); continue; }
+        const clean = document.createElement(node.tagName.toLowerCase());
+        for (const attr of ["colspan","rowspan"]){
+          if (["TD","TH"].includes(node.tagName) && node.hasAttribute(attr)) clean.setAttribute(attr, String(Math.min(50, Math.max(1, Number(node.getAttribute(attr)) || 1))));
+        }
+        copy(node, clean);
+        target.appendChild(clean);
+      }
+    }
+  };
+  const output = document.createElement("div");
+  copy(template.content, output);
+  return output.innerHTML;
+}
+function previewImagePath(value){
+  const path = String(value || "").trim();
+  return path && (/^https?:\/\//i.test(path) || !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(path)) ? path : "icons/svg/box.svg";
+}
+function buildShopPreview(source, stock){
+  const sys = source?.system || {};
+  const fields = [
+    ["variety","Variety"], ["weaponType","Weapon type"], ["weaponSkill","Weapon skill"],
+    ["damage","Damage"], ["rof","Rate of fire"], ["attackmod","Attack modifier"],
+    ["handsReq","Hands required"], ["concealable","Concealable"], ["quality","Quality"],
+    ["sp","Stopping power"], ["penalty","Armor penalty"], ["location","Location"],
+    ["weight","Weight"], ["humanityLoss","Humanity loss"], ["installation","Installation"]
+  ];
+  const details = fields.flatMap(([key,label]) => {
+    const value = sys[key];
+    return value !== null && value !== undefined && value !== "" && ["string","number","boolean"].includes(typeof value)
+      ? [{label, value:String(value)}] : [];
+  });
+  const description = typeof sys.description === "string" ? sys.description : sys.description?.value;
+  return {
+    name:String(stock.name || source.name || "Item"), img:previewImagePath(stock.img || source.img),
+    kind:getItemKind(source), marketPrice:getItemMarketValue(source),
+    packageSize:Math.max(1, Number(bodegaMarketFlags(source).size || marketPackageSizeFromData(source)) || 1),
+    details, description:sanitizePreviewDescription(description)
+  };
+}
+async function resolveShopPreview(payload){
+  const user = game.users?.get?.(payload?.userId);
+  if (!user) throw new Error("The requesting user is no longer available.");
+  const db = await loadAll();
+  const shop = db.shops?.[payload?.shopId];
+  if (!shop) throw new Error("This Bodega is no longer available.");
+  const buyer = payload?.buyerUuid ? await byUUID(payload.buyerUuid) : null;
+  if (!user.isGM && (!buyer || !buyer.testUserPermission?.(user, "OWNER"))) throw new Error("Choose a customer character you control.");
+  if (!user.isGM && shop.sceneOnly && shop.sceneId && shop.sceneId !== user.viewedScene) throw new Error("This Bodega is not available on your scene.");
+  // Resolve only stock currently offered by this shop. Never accept a requested source UUID.
+  const stock = (shop.items || []).find(item => dynamicItemKey(item) === String(payload.itemKey || "").toLowerCase() && String(item.stockClass || "static") === payload.stockClass);
+  if (!stock) throw new Error("That item changed. Re-open the Bodega and try again.");
+  const rank = getFixerRank(buyer);
+  if (!user.isGM && stock.fixerOnly && (rank <= 0 || (stock.fixerMinRank && rank < Number(stock.fixerMinRank)))) throw new Error("This item requires a qualifying Fixer.");
+  const source = (stock.uuid ? await byUUID(stock.uuid) : null) || stock.raw;
+  if (!source || (source.documentName && source.documentName !== "Item")) throw new Error("The source item is no longer available for inspection.");
+  if (!game.user?.isGM && source.documentName && !source.testUserPermission?.(game.user, "OBSERVER")) throw new Error("An active GM is needed to preview this item.");
+  return buildShopPreview(source, stock);
+}
+function showShopPreview(preview, accent){
+  const bodyId = makeUiId("preview");
+  const style = document.createElement("style");
+  style.textContent = makePlayerCSS(accent, bodyId) + `
+    #${bodyId} .preview-head{display:flex;align-items:center;gap:14px;padding:14px}
+    #${bodyId} .preview-head img{width:72px;height:72px;object-fit:contain}
+    #${bodyId} .preview-name{font-size:20px;font-weight:800;overflow-wrap:anywhere}
+    #${bodyId} .preview-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:14px}
+    #${bodyId} .preview-description{padding:14px;max-height:55vh;overflow:auto;overflow-wrap:anywhere;white-space:normal}
+    #${bodyId} .preview-description table{width:100%;border-collapse:collapse;display:block;overflow:auto}
+    #${bodyId} .preview-description th,#${bodyId} .preview-description td{padding:6px;border:1px solid var(--accent)}
+    #${bodyId} .preview-description pre{white-space:pre-wrap}
+  `;
+  const content = `<div id="${bodyId}"><div class="wrap">
+    <div class="card preview-head"><img src="${esc(previewImagePath(preview.img))}" alt=""><div><div class="preview-name">${esc(preview.name)}</div><div class="muted">${esc(preview.kind)} • Market value ${esc(preview.marketPrice)} eb${preview.packageSize > 1 ? ` / ${esc(preview.packageSize)} units` : ""}</div><div class="muted">Read-only item preview</div></div></div>
+    ${preview.details?.length ? `<div class="card preview-details">${preview.details.map(d=>`<div><b>${esc(d.label)}:</b> ${esc(d.value)}</div>`).join("")}</div>` : ""}
+    <div class="card preview-description">${sanitizePreviewDescription(preview.description) || '<p class="muted">No description provided.</p>'}</div>
+  </div></div>`;
+  return new Dialog({title:"Bodega™ — Item Preview", content, buttons:{close:{label:"Close"}}, render:html=>{
+    document.head.appendChild(style);
+    const app = html[0].closest(".app");
+    app.classList.add(`dialog-host-${bodyId}`);
+    forceFooterButtons(app, accent);
+  }, close:()=>cleanupDialogVisuals(style)}, {width:720,resizable:true}).render(true);
+}
+async function openStockPreview(shop, stock, buyer, accent){
+  const payload = {nonce:bodegaNonce(), userId:game.user.id, shopId:shop.id, buyerUuid:buyer.uuid, itemKey:dynamicItemKey(stock), stockClass:stock.stockClass || "static"};
+  if (game.user.isGM || !game.users?.activeGM) return showShopPreview(await resolveShopPreview(payload), accent);
+  const result = await new Promise((resolve,reject)=>{
+    const timeout = setTimeout(()=>{game.socket.off(SOCKET, onResult); reject(new Error("The GM did not respond to the item preview. Try again."));}, 8000);
+    const onResult = message => {
+      if (message?.op !== "preview-result" || message.nonce !== payload.nonce || message.userId !== game.user.id) return;
+      clearTimeout(timeout); game.socket.off(SOCKET,onResult);
+      if (message.preview) resolve(message.preview); else reject(new Error(message.message || "Item preview unavailable."));
+    };
+    game.socket.on(SOCKET,onResult);
+    game.socket.emit(SOCKET,{op:"item-preview",payload});
+  });
+  return showShopPreview(result,accent);
+}
+
 function getItemMarketValue(doc){
   const sys = doc.system || {};
   if (sys.price?.market != null) return Math.max(0, Number(sys.price.market|0));
@@ -3050,12 +3196,14 @@ async function openAdmin() {
           dynamic:defaultDynamicSettings(),
           purse: 0,
           customerDiscounts:[],
+          buybackLimit:normalizeBuybackLimit(),
           buyback: {
             Ammo:{on:false,pct:50}, Armor:{on:false,pct:50}, Clothing:{on:false,pct:50},
             Cyberdeck:{on:false,pct:40}, Cyberware:{on:false,pct:40}, Drug:{on:false,pct:30},
             Gear:{on:false,pct:50},   Upgrade:{on:false,pct:50}, Vehicle:{on:false,pct:30}, Weapon:{on:false,pct:50}
           }
         };
+        data.buybackLimit = normalizeBuybackLimit(data.buybackLimit);
         data.customerDiscounts = normalizeCustomerDiscounts(data.customerDiscounts);
         const renderCustomerDiscounts = () => data.customerDiscounts.length
           ? data.customerDiscounts.map((entry,i)=>`
@@ -3159,6 +3307,15 @@ async function openAdmin() {
                 <div class="drop" data-customer-discount-drop>Drop PC Actor/Token here to grant a Bodega discount</div>
               </div>
 
+              <div style="margin:10px 0">
+                <label class="row" style="gap:6px;align-items:center">
+                  <input type="checkbox" class="bb-limit-on" ${data.buybackLimit.enabled ? 'checked' : ''}> Limit Buyback Value
+                </label>
+                <label>Maximum Buyback Value (eb)
+                  <input type="number" class="bb-limit-max" min="0" step="1" value="${data.buybackLimit.maximum}" ${data.buybackLimit.enabled ? '' : 'disabled'} style="width:120px">
+                </label>
+                <div class="muted">Accepts items at or below this original market item/package value, before buyback percentages or Operator bonuses. Uncheck to bypass the value limit.</div>
+              </div>
               <div class="bb-grid">
                 ${["Ammo","Armor","Clothing","Cyberdeck","Cyberware","Drug","Gear","Upgrade","Vehicle"].map(K=>`
                   <label class="row" style="gap:6px;align-items:center">
@@ -3578,6 +3735,16 @@ async function openAdmin() {
               await commit();
             });
 
+            rootEd.querySelector(".bb-limit-on")?.addEventListener("change", async e=>{
+              data.buybackLimit.enabled = !!e.target.checked;
+              rootEd.querySelector(".bb-limit-max").disabled = !data.buybackLimit.enabled;
+              await commit();
+            });
+            rootEd.querySelector(".bb-limit-max")?.addEventListener("change", async e=>{
+              data.buybackLimit = normalizeBuybackLimit({...data.buybackLimit, maximum:e.target.value});
+              e.target.value = String(data.buybackLimit.maximum);
+              await commit();
+            });
             rootEd.addEventListener("change", async (e)=>{
               if (e.target.classList.contains("bb-on")){
                 const k = e.target.getAttribute("data-kind");
@@ -3876,6 +4043,7 @@ async function openShop(shopId, options={}){
     const qtyAvail = readStackQty(it);
     return {
       it, kind, baseVal, basePct, finalPct, offer:offerPack, offerPack, packageSize, qtyAvail,
+      limitMessage:buybackLimitMessage(shop, baseVal),
       packageVerified:!!packageInfo.verified,
       packageProvenance:packageInfo.provenance || "unknown"
     };
@@ -3941,9 +4109,9 @@ const itemsListHTML = visible.length ? visible.map((it,i)=>{
     <div class="card bodega-stock-row" data-bodega-item-key="${esc(dynamicItemKey(it))}" data-bodega-stock-class="${esc(it.stockClass || (it.dynamicManaged ? 'dynamic' : 'static'))}">
       <div class="item-row">
         <div class="item-left">
-          <img class="thumb" src="${it.img || 'icons/svg/box.svg'}">
+          <button type="button" class="inspect-image" data-inspect="${i}" title="Inspect item" aria-label="${esc('Inspect '+it.name)}"><img class="thumb" src="${esc(previewImagePath(it.img))}" alt=""></button>
           <div>
-            <div class="name" title="${esc(it.name)}">${esc(it.name)}</div>
+            <button type="button" class="name inspect-name" data-inspect="${i}" title="Inspect item">${esc(it.name)}</button>
             ${priceLine}
           </div>
         </div>
@@ -3973,7 +4141,7 @@ const sellBlockHTML = sellables.length ? `
             <div>
               <div class="name" title="${esc(s.it.name)}">${esc(s.it.name)}</div>
               <div class="muted">
-                ${!s.packageVerified
+                ${s.limitMessage ? `<span class="stock-badge tradein">VALUE LIMIT</span> • ${esc(s.limitMessage)}` : !s.packageVerified
                   ? `<span class="stock-badge tradein">GM REVIEW REQUIRED</span> • Original market package size cannot be verified`
                   : (s.packageSize > 1
                     ? `Market pack <b>${s.packageSize}</b> for <b>${s.baseVal|0}</b> <span class="eb">eb</span> • Offer <b>${s.offerPack|0}</b> <span class="eb">eb</span> per full-pack equivalent (${s.finalPct|0}%)`
@@ -3986,7 +4154,7 @@ const sellBlockHTML = sellables.length ? `
   <label class="qty-label">QTY
     <input class="qty-sell" type="number" min="1" max="${s.qtyAvail}" value="${Math.min(1, s.qtyAvail)}">
   </label>
-  <button class="btn sell" data-sell ${s.packageVerified ? '' : 'title="Ask the active GM to verify this item’s original market package size and approve the buyback."'}>${s.packageVerified ? 'Sell' : 'GM Review'}</button>
+  <button class="btn sell" data-sell ${s.limitMessage ? `disabled title="${esc(s.limitMessage)}"` : s.packageVerified ? '' : 'title="Ask the active GM to verify this item’s original market package size and approve the buyback."'}>${s.limitMessage ? 'Not accepted' : s.packageVerified ? 'Sell' : 'GM Review'}</button>
 </div>
 
         </div>
@@ -4009,6 +4177,7 @@ const content = `
     </div>
     ${fixerTag}
     ${preferredTag}
+    ${normalizeBuybackLimit(shop.buybackLimit).enabled ? `<div class="muted">Buyback limit: original market item/package value up to ${normalizeBuybackLimit(shop.buybackLimit).maximum} eb.</div>` : ''}
     <div class="list" data-list>
       ${itemsListHTML}
     </div>
@@ -4028,6 +4197,18 @@ const content = `
       app.classList.add(`dialog-host-${bodyId}`);
       forceFooterButtons(app, accent);
       const root = html[0].querySelector(`#${bodyId}`);
+
+      root.querySelector("[data-list]")?.addEventListener("click", async ev=>{
+        const control = ev.target.closest("[data-inspect]");
+        if (!control || control.disabled) return;
+        ev.preventDefault();
+        const stock = visible[Number(control.dataset.inspect)];
+        if (!stock) return;
+        control.disabled = true;
+        try { await openStockPreview(shop, stock, buyer, accent); }
+        catch (error) { ui.notifications.warn(error.message || "Item preview unavailable."); }
+        finally { control.disabled = false; }
+      });
 
       // BUY handler: every purchase is GM-authoritative and serialized per Bodega.
       root.querySelector("[data-list]")?.addEventListener("click", async (ev)=>{
@@ -4130,6 +4311,11 @@ const content = `
           row.querySelector(".sell")?.removeAttribute("disabled");
           return;
         }
+        if (entry.limitMessage) {
+          ui.notifications.warn(entry.limitMessage);
+          row.dataset.busy = "";
+          return;
+        }
         if (!entry.packageVerified) {
           const freshReview = buyer.items.get(entry.it.id)
             || buyer.items.find(i => i.name === entry.it.name && getItemMarketValue(i) === entry.baseVal);
@@ -4216,6 +4402,13 @@ const content = `
           row.dataset.busy = "";
           row.querySelector(".sell")?.setAttribute("disabled", "true");
           row.querySelector(".qty-sell")?.setAttribute("disabled", "true");
+          return;
+        }
+        const limitMessage = buybackLimitMessage(shop, packageInfoNow.marketPrice);
+        if (limitMessage) {
+          ui.notifications.warn(limitMessage);
+          row.dataset.busy = "";
+          row.querySelector(".sell")?.setAttribute("title", limitMessage);
           return;
         }
         const qtyInput = Number(row.querySelector(".qty-sell")?.value ?? 1) | 0;
