@@ -1,4 +1,15 @@
 # Bodega™ Changelog
+## 2.4.0
+- Based on the canonical GitHub release **2.3.14** (tag commit `2086ba6e5c856bbe63c247a230f673cd8e0466d9`), retaining its storefront/cart icon and asset attribution.
+- Click a stock item name or image to inspect its description and key equipment stats in a separate read-only Bodega window. Does not open or alter the source Item sheet or ownership.
+- Active GM resolves restricted World/Compendium sources using current Bodega stock and customer eligibility. Only display fields and sanitized descriptions are returned; secret sections, controls, document links, embeds, and executable HTML are removed. Basic formatting and tables remain. Missing sources return a clear message; raw trade-in snapshots are supported.
+- Added per-Bodega **Limit Buyback Value** checkbox and **Maximum Buyback Value (eb)** field under **Buyback / Vendor Cash**. Legacy and new shops default to disabled (suggested threshold 500 eb).
+- Limit compares original market item/package price before percentages, Operator bonuses, selected quantity, or partial-package proration. Exact threshold is accepted. Turn off the checkbox to bypass only this price restriction.
+- Above-limit items display an explicit refusal in the shop. Serialized GM buybacks, fallback approvals, and GM-reviewed package transactions recheck the current cap before metadata, cash, or inventory changes.
+- Declared recommended Simple Calendar compatibility: minimum **2.4.17**, verified **2.4.18**, maximum **2.4.18**.
+- Declared recommended Monk's Active Tile Triggers compatibility: minimum **12.01**, verified **12.02**, maximum **12.02**. Both integrations remain optional.
+- Updated README recommendations for Bodega calendar-driven traffic/restocking and click-to-open shop Tiles and added Credits and Asset Notice with R.Tal Legal and Homebrew Content Policy.
+
 ## 2.3.14
 - Replaced `assets/bodega.webp` with the new storefront + shopping-cart hybrid icon to better match the Cyberpunk RED core compendium visual language while keeping the established Bodega asset path intact.
 - Updated README attribution and asset provenance notes for the packaged Bodega icon.
