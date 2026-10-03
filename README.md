@@ -1,10 +1,19 @@
 # Bodega-Persistent-Shops for use with Cyberpunk RED
 
-Persistent Cyberpunk RED bodegas with protected vendor ledgers and serialized purchases and live stock updates with GM-review protection of unverified stock. Fixer pricing and automatic Fixer gating with static+dynamic inventory with RollTable/pack sources, Simple Calendar traffic/restocking, with direct Monk's Active Tile binding.
+Persistent bodegas for use with Cyberpunk Red with protected vendor ledgers and serialized purchases and live stock updates with GM-review protection of unverified stock. Fixer pricing and automatic Fixer gating with static+dynamic inventory with RollTable/pack sources, Simple Calendar traffic/restocking, with direct Monk's Active Tile binding.
 
-This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.3.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
+This module was initially assisted by AI to converts the Bodega™ Manager v2.0.3/v2.0.3c macros to continue as the v2.x module line into a world-loaded Foundry module. Legacy macros can be found in Cyberpunk Red Foundry VTT shared content discord channel.
 
 [Bodega™ Persistent Shops Wiki](https://github.com/LtAtasEDO/Bodega-Persistent-Shops/wiki)
+
+## Compatibility and recommended modules
+
+- **Foundry VTT:** minimum **v12**, verified **v12.343**, maximum **v12**.
+- **Cyberpunk RED system:** minimum **v0.92.1**, verified **v0.92.4**.
+- **Recommended: Simple Calendar v2.4.17–v2.4.18** for in-world customer traffic and scheduled daily restocking; verified with **v2.4.18** (minimum **2.4.17**, maximum **2.4.18**).
+- **Recommended: Monk's Active Tile Triggers v12.01–v12.02** for click-to-open Bodega Tiles; verified with **v12.02** (minimum **12.01**, maximum **12.02**).
+
+Both modules remain optional recommendations in `module.json`. Bodega does not require them to open shops through its manager, vendor Tokens, or direct API; Simple Calendar enables automatic calendar-driven traffic/restocking.
 
 ## Install
 
@@ -12,8 +21,26 @@ This module was initially assisted by AI to converts the Bodega™ Manager v2.0.
 2. Extract the included `bodega` folder into `FoundryVTT/Data/modules/`.
 3. Start Foundry and enable **Bodega™ Persistent Shops** in the world.
 4. Disable or delete the old Bodega Persistent Shops and Autobind macros after confirming the module works.
+5. Or use the Manifest URL on the Foundry Module Installer: [Manifest URL](https://github.com/LtAtasEDO/Bodega-Persistent-Shops/releases/latest/download/module.json)
 
 The module deliberately keeps the original `bodega.db` world setting, so existing configured shops should appear without rebuilding them.
+
+## Item inspection and buyback value limit (2.4.0)
+
+Click a stock item's **name or image** to open a separate **read-only item preview**. The window shows its description, original market value, package size, and supported equipment stats. It preserves basic text formatting and tables; secret sections, editing controls, executable HTML, interactive rolls, document actions, and embeds are excluded. Foundry reference labels appear as plain text. The preview uses the source UUID or a stored raw trade-in snapshot without granting access to or modifying the source Item.
+
+With an active GM connected, the GM resolves restricted World/Compendium items and checks the customer's Bodega/Fixer eligibility. Without an active GM, a player can preview only sources already readable by that player or raw stock snapshots. Missing sources and unanswered preview requests show a clear notification. Sold-out stock can still be inspected while it remains listed.
+
+Open **Edit Bodega → Buyback / Vendor Cash**:
+
+- Check **Limit Buyback Value**.
+- Set **Maximum Buyback Value (eb)**, for example `500`.
+- Items with an original market item/package price **at or below** that value qualify for the existing buyback rules; higher-priced items show why they are refused.
+- Uncheck the limit to restore unrestricted values. Category toggles, percentages, package verification, and vendor cash rules still apply.
+
+The cap uses original market value **before** buyback percentages or Operator bonuses. It does not compare the discounted payout or multiply the cap by the selected quantity. A 1,000 eb package remains above a 500 eb limit even if the customer sells only part of it for 100 eb. Unknown package sizes keep the GM review workflow; the reviewed package price is checked against the cap again when approved.
+
+Existing Bodegas default to **limit off**. Each vendor keeps its own checkbox and threshold. No new runtime dependency is required.
 
 ## Open the manager
 
@@ -48,18 +75,6 @@ return game.bodega.launch({ id: "your-shop-id" });
 - `game.bodega.launch(input)` — compatibility launcher.
 - `game.bodega.loadAll()` / `saveAll(db)` — database access.
 - `game.bodega.bind()` — manually ensure the socket bridge is bound.
-
-
-## Asset credit (bodega.webp)
-
-As of **v2.3.14**, the packaged `assets/bodega.webp` icon uses a modified **storefront + shopping-cart hybrid** created for Bodega to better match the visual language used by the Cyberpunk RED core compendium and related local modules.
-
-Source vectors used for the derivative icon:
-
-- **Store** — SVG Repo, **CC0 License**
-- **Shopping Cart** — SVG Repo, **CC0 License**
-
-The final `bodega.webp` icon bundled in this module is a remixed/edited derivative prepared for Bodega and may be recolored or further refined as needed for future releases.
 
 ## What changed from the macros
 
@@ -239,3 +254,20 @@ This project is provided free of charge under the R. Talsorian Games Homebrew Co
 Bodega Persistent Shops for use with Cyberpunk RED is unofficial content provided under the Homebrew Content Policy of R. Talsorian Games and is not approved or endorsed by RTG. This content references materials that are the property of R. Talsorian Games and its licensees.
 
 Cyberpunk RED and related properties are the property of R. Talsorian Games and their respective licensees.
+
+## Credits and Asset Notice (bodega.webp)
+
+Created by Lt Atlas for Cyberpunk RED on Foundry VTT, with development assistance from AI.
+
+This project is unofficial fan tooling and is not affiliated with R. Talsorian Games, Foundry Gaming LLC, or CD PROJEKT RED.
+
+The bundled bodega asset is derived from: SVG Repo Store vector and SVG Repo Shopping Cart vector. Attribution and the license text are also included in THIRD_PARTY_NOTICES.md.
+
+As of **v2.3.14**, the packaged `assets/bodega.webp` icon uses a human modified **storefront + shopping-cart hybrid** created for Bodega to better match the visual language used by the Cyberpunk RED core compendium and related local modules.
+
+Source vectors used for the derivative icon:
+
+- **Store** — SVG Repo, **CC0 License**
+- **Shopping Cart** — SVG Repo, **CC0 License**
+
+The final `bodega.webp` icon bundled in this module is a remixed/edited derivative prepared for Bodega and may be recolored or further refined as needed for future releases.
