@@ -1,4 +1,13 @@
-# Bodega™ Changelog
+# Bodega Persistent Shops Changelog
+
+## 2.4.1
+- Fixed read-only previews displaying inherited weapon defaults (including 1d6 damage) on ordinary cyberware such as Neural Link and optics. Combat details now require a Weapon Item, the explicit `system.isWeapon` capability, or a configured secondary-weapon upgrade.
+- Retained legitimate cyberweapon damage, including Vampyres at 1d6; no name-based or damage-value heuristics.
+- Fixed armor SP display using CPR's nested body/head locations and enabled-location flags. Unused locations stay hidden, zero SP remains visible, and nonzero ablation is labeled separately from base SP. Shields show their current/max HP instead of inherited location SP. Legacy flat SP remains supported.
+- Preview display fix only; source item data, shop economy, and recommended-module compatibility ranges are unchanged.
+- Based on current GitHub main (`a7ec26a9c9bf3ff56e6b9e6e3acd46f3bc52339d`), preserving maintainer README/legal/credit edits and bundled artwork.
+- Manual-install beta for live GM/player validation; the unpublished testing manifest omits update/download URLs.
+
 ## 2.4.0
 - Based on the canonical GitHub release **2.3.14** (tag commit `2086ba6e5c856bbe63c247a230f673cd8e0466d9`), retaining its storefront/cart icon and asset attribution.
 - Click a stock item name or image to inspect its description and key equipment stats in a separate read-only Bodega window. Does not open or alter the source Item sheet or ownership.
@@ -157,7 +166,6 @@
 
 
 ## 2.1.0
-
 - Converted the Bodega™ macros into a Foundry VTT v12 module.
 - Preserved the existing `bodega.db` storage namespace.
 - Automatically binds the GM socket bridge on world load.
