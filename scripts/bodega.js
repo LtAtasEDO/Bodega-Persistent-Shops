@@ -1,5 +1,5 @@
 /**
- * Bodega™ Persistent Shops — Foundry VTT Module v2.4.0
+ * Bodega™ Persistent Shops — Foundry VTT Module v2.4.1
  *
  * Ported from the Bodega™ v2.0.3 / v2.0.3c macros for Foundry VTT 12.
  * Keeps the existing world setting namespace (bodega.db) so configured shops migrate in place.
@@ -9,7 +9,7 @@
 "use strict";
 
 const MODULE_ID = "bodega";
-const MODULE_VERSION = "2.4.0";
+const MODULE_VERSION = "2.4.1";
 const SOCKET = `module.${MODULE_ID}`;
 let isGM = false;
 let sceneId = null;
@@ -2819,26 +2819,61 @@ function previewImagePath(value){
   const path = String(value || "").trim();
   return path && (/^https?:\/\//i.test(path) || !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(path)) ? path : "icons/svg/box.svg";
 }
+function itemPreviewDetails(source){
+  const sys = source?.system || {};
+  const type = String(source?.type || "").toLowerCase();
+  const details = [];
+  const add = (label, value) => {
+    if (value !== null && value !== undefined && value !== "" && ["string","number","boolean"].includes(typeof value)) {
+      details.push({label, value:String(value)});
+      return true;
+    }
+    return false;
+  };
+  add("Variety", sys.variety);
+  // CPR cyberware and upgrades inherit AttackableSchema's default combat fields.
+  // Their presence (even nonzero damage) does not mean the item is a weapon.
+  const isWeapon = type === "weapon" || sys.isWeapon === true
+    || (type === "itemupgrade" && sys.modifiers?.secondaryWeapon?.configured === true);
+  if (isWeapon){
+    for (const [key,label] of [
+      ["weaponType","Weapon type"], ["weaponSkill","Weapon skill"],
+      ["damage","Damage"], ["rof","Rate of fire"], ["attackmod","Attack modifier"],
+      ["handsReq","Hands required"], ["concealable","Concealable"]
+    ]) add(label, sys[key]);
+  }
+  if (type === "armor"){
+    if (sys.isShield === true){
+      const hp = sys.shieldHitPoints;
+      if (hp?.value != null && hp?.max != null) add("Shield HP", `${hp.value} / ${hp.max}`);
+    } else {
+      let hasLocationSP = false;
+      for (const [key,flag,label] of [
+        ["bodyLocation","isBodyLocation","Body"], ["headLocation","isHeadLocation","Head"]
+      ]){
+        // Disabled locations still carry default SP in CPR's armor schema.
+        if (sys[flag] !== true && !(sys[flag] == null && sys[key]?.sp != null)) continue;
+        hasLocationSP = add(`${label} SP`, sys[key]?.sp) || hasLocationSP;
+        if (Number(sys[key]?.ablation) > 0) add(`${label} ablation`, sys[key].ablation);
+      }
+      if (!hasLocationSP) add("Stopping power", sys.sp); // Legacy flat armor data.
+    }
+    add("Armor penalty", sys.penalty);
+  }
+  for (const [key,label] of [
+    ["quality","Quality"], ["location","Location"],
+    ["weight","Weight"], ["humanityLoss","Humanity loss"], ["installation","Installation"]
+  ]) add(label, sys[key]);
+  return details;
+}
 function buildShopPreview(source, stock){
   const sys = source?.system || {};
-  const fields = [
-    ["variety","Variety"], ["weaponType","Weapon type"], ["weaponSkill","Weapon skill"],
-    ["damage","Damage"], ["rof","Rate of fire"], ["attackmod","Attack modifier"],
-    ["handsReq","Hands required"], ["concealable","Concealable"], ["quality","Quality"],
-    ["sp","Stopping power"], ["penalty","Armor penalty"], ["location","Location"],
-    ["weight","Weight"], ["humanityLoss","Humanity loss"], ["installation","Installation"]
-  ];
-  const details = fields.flatMap(([key,label]) => {
-    const value = sys[key];
-    return value !== null && value !== undefined && value !== "" && ["string","number","boolean"].includes(typeof value)
-      ? [{label, value:String(value)}] : [];
-  });
   const description = typeof sys.description === "string" ? sys.description : sys.description?.value;
   return {
     name:String(stock.name || source.name || "Item"), img:previewImagePath(stock.img || source.img),
     kind:getItemKind(source), marketPrice:getItemMarketValue(source),
     packageSize:Math.max(1, Number(bodegaMarketFlags(source).size || marketPackageSizeFromData(source)) || 1),
-    details, description:sanitizePreviewDescription(description)
+    details:itemPreviewDetails(source), description:sanitizePreviewDescription(description)
   };
 }
 async function resolveShopPreview(payload){
