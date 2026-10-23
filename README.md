@@ -25,6 +25,14 @@ Both modules remain optional recommendations in `module.json`. Bodega does not r
 
 The module deliberately keeps the original `bodega.db` world setting, so existing configured shops should appear without rebuilding them.
 
+## Preview stat correction (2.4.1)
+
+Version 2.4.1 corrects item inspection stats. Ordinary cyberware no longer displays inactive weapon defaults; cyberware marked **Is Weapon** still shows its actual combat values, including genuine 1d6 weapons. Weapon Items and configured secondary-weapon upgrades retain their combat details.
+
+Armor previews show **Body SP** and/or **Head SP** for the locations the item actually covers. SP is the base value; any nonzero ablation appears separately. Unused location defaults are hidden, while shields show current/max **Shield HP**.
+
+Promoted to stable after the maintainer confirmed live player validation of the suspected items and additional item types on October 22, 2026. Stable GitHub update/download URLs are restored for version 2.4.1. For manual installation, stop Foundry, replace the `bodega` module folder, restart, and refresh GM/player browsers. See `VALIDATION.md` for the validation record.
+
 ## Item inspection and buyback value limit (2.4.0)
 
 Click a stock item's **name or image** to open a separate **read-only item preview**. The window shows its description, original market value, package size, and supported equipment stats. It preserves basic text formatting and tables; secret sections, editing controls, executable HTML, interactive rolls, document actions, and embeds are excluded. Foundry reference labels appear as plain text. The preview uses the source UUID or a stored raw trade-in snapshot without granting access to or modifying the source Item.
